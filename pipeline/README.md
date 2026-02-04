@@ -1,6 +1,6 @@
 # A pipeline for ephys data (from pre-processing to post-processing)
 
-by Jiarui Sun
+This folder was created by Jiarui Sun.
 
 From pre-processing to post-processing of ephys data, we have a pipeline as below:
 

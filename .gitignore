@@ -1,4 +1,5 @@
-# === Big data / analysis outputs ===
+# Big data / analysis outputs
+DemoData/
 *.npy
 *.npz
 *.pkl
@@ -7,20 +8,25 @@
 *.hdf5
 *.bin
 *.dat
+*.mat
+*.csv
+
+# Figures
+*.png
+*.pdf
+*.jpg
+*.svg
+*.tiff
 
 # SpikeInterface outputs & waveform extractions
 pipeline/spikeinterface_waveform_extraction/
-pipeline/Unitmatch/for_RawWaveform_extraction/
-DemoData/
+pipeline/Unitmatch/
 
-# Model outputs directories
-model_outputs/
-quick_start_outputs/
-
-# === Python cache / misc ===
+# Python cache / misc logs
 __pycache__/
-*.pyc
 .ipynb_checkpoints/
+*.pyc
+*.log
 
 # Env stuff
 .env

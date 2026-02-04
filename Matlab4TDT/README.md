@@ -1,6 +1,7 @@
 # Quite messy memorandum
 
-Quick map of what happens when I run `TDT_main.m` on fresh TDT photometry data.
+This pipeline is inhereted from Ayano's TDT pipeline. You must tweak the file searching logic when you copy and use this function, because its searching logic is hard coded and experimenter specific.  
+Quick map of what happens when I run `TDT_main.m` on fresh TDT photometry data.  
 
 ## Execution order from TDT_main.m
 1) `TDT_demod(session_name, Save_univ_dir0, Save_univ_dir1, reload)`  

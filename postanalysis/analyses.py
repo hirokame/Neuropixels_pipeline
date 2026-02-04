@@ -1,8 +1,9 @@
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from postanalysis.data_loader import DataPaths
-from postanalysis.data_loader_refactored import (
+from postanalysis.data_loader import (
+    DataPaths,
+    convert_date_formats,
     load_dataset_config,
     find_config_entry,
     get_column_name,
@@ -293,11 +294,17 @@ def _get_kinematic_states(paths: DataPaths, speed_threshold: float = 5.0, px_per
         
         # DLC for tracking and velocity
         dlc_loader = DLCDataLoader(base_path, config)
-        df_dlc = dlc_loader.load()
+        # Check if dlc_h5 exists in paths
+        if not paths.dlc_h5 or not paths.dlc_h5.exists():
+            print("  Warning: DLC file not found.")
+            return []
+            
+        df_dlc = dlc_loader.load(paths.dlc_h5)
         
         # Calculate average speed of Snout and Tail
-        v_snout, _ = dlc_loader.calculate_velocity(df_dlc, bodypart='Snout', px_per_cm=px_per_cm)
-        v_tail, _ = dlc_loader.calculate_velocity(df_dlc, bodypart='Tail', px_per_cm=px_per_cm)
+        strobe_path = paths.strobe_seconds
+        v_snout, _ = dlc_loader.calculate_velocity(df_dlc, bodypart='Snout', px_per_cm=px_per_cm, strobe_path=strobe_path)
+        v_tail, _ = dlc_loader.calculate_velocity(df_dlc, bodypart='Tail', px_per_cm=px_per_cm, strobe_path=strobe_path)
         
         # Ensure length matches df_dlc
         if len(v_snout) < len(df_dlc):
@@ -313,7 +320,7 @@ def _get_kinematic_states(paths: DataPaths, speed_threshold: float = 5.0, px_per
             return []
         
         corner_key = next(k for k, v in config.items() if v == corner_cfg)
-        corner_df = event_loader.load(config_key=corner_key, sync_to_dlc=True, dlc_loader=dlc_loader)
+        corner_df = event_loader.load(paths.event_corner, sync_to_dlc=True, dlc_data=df_dlc)
         port_ids = event_loader.infer_port_id(corner_df).values
         
         # 3. Timebase (Strobes or Fixed FS)
@@ -689,7 +696,7 @@ def _plot_metric_swarm(df, col_name, output_path, title, ylabel, p_val_col='p_va
         import traceback
         traceback.print_exc()
 
-def _load_spike_data(paths: DataPaths, return_types: bool = False):
+def _load_spike_data(paths: DataPaths, return_types: bool = True):
     """
     Loads spike times and clusters from Kilosort output.
     
@@ -708,7 +715,7 @@ def _load_spike_data(paths: DataPaths, return_types: bool = False):
         base_path = paths.neural_base.parent if paths.neural_base else Path('.')
         base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
         spike_loader = SpikeDataLoader(base_path, config)
-        spike_data = spike_loader.load()
+        spike_data = spike_loader.load(paths.kilosort_dir)
         
         if return_types:
             return (
@@ -1016,42 +1023,39 @@ def _is_move_correct(start_port: int, end_port: int, cw_order: list, rule_is_cw:
 
 def _load_switch_times(paths, config, event_loader, dlc_loader=None):
     """Loads switch times, correctly handling separate or embedded switch data."""
-    switch_cfg = find_config_entry(paths.event_condition_switch, config)
-    if not switch_cfg:
+    if not paths.event_condition_switch:
         return np.array([])
         
-    switch_key = next(k for k, v in config.items() if v == switch_cfg)
-    
-    if str(paths.event_condition_switch) == str(paths.event_corner):
+    # Check if this maps to the corner file (embedded rule)
+    if paths.event_condition_switch == paths.event_corner:
         # Rule switch is embedded in corner file (e.g. CW column)
-        corner_df_full = event_loader.load(config_key=switch_key, sync_to_dlc=(dlc_loader is not None), dlc_loader=dlc_loader)
-        rule_col = get_column_name(switch_cfg, ['CW', 'Condition', 'Rule', 'Protocol'])
+        corner_df_full = event_loader.load(paths.event_corner, sync_to_dlc=False) # sync not needed just for times
         
-        if rule_col and rule_col in corner_df_full.columns:
+        # Look for rule column
+        rule_cols = ['CW', 'Condition', 'Rule', 'Protocol']
+        rule_col = next((c for c in rule_cols if c in corner_df_full.columns), None)
+        
+        if rule_col:
             # Shift detects where values change
             df_rule = corner_df_full[rule_col].copy()
             
-            # Convert to numeric if possible to handle True/False/1/0
+            # Convert to numeric to handle True/False
             if df_rule.dtype == bool or np.issubdtype(df_rule.dtype, np.bool_):
                 df_rule = df_rule.map({True: 1, False: 0})
             
-            # Forward-fill AND backward-fill to eliminate NaN transitions at edges
+            # Forward/Backward fill NaNs
             df_rule = df_rule.ffill().bfill()
             
             rule_changes = df_rule.diff().fillna(0) != 0
             rule_changes.iloc[0] = False
             
             switch_df = corner_df_full[rule_changes]
-            times = event_loader.get_event_times(switch_df, switch_key)
+            
+            # Use strobe for absolute timing
+            strobe_path = paths.kilosort_dir / "strobe_seconds.npy" if paths.kilosort_dir else None
+            times = event_loader.get_event_times(switch_df, strobe_path=strobe_path)
             return times
 
-    # Standard separate switch file or onset-based
-    switch_df = event_loader.load(config_key=switch_key, sync_to_dlc=(dlc_loader is not None), dlc_loader=dlc_loader)
-    switch_df = _get_event_onsets_df(switch_df, switch_cfg)
-    times = event_loader.get_event_times(switch_df, switch_key)
-    
-    # DEBOUNCE LOGIC for all switch times
-    # Filter out switches that are too close together (likely artifacts)
     if len(times) > 1:
         valid_times = [times[0]]
         for t in times[1:]:
@@ -1072,29 +1076,19 @@ def _get_behavioral_switch_points(switch_times, corner_times_onsets, corner_ids_
     [{'switch_time', 'decision_time', 'success_time', 'first_correct_trial_idx', 'rule_is_cw'}]
     """
     switch_points = []
-    
-    rule_col = get_column_name(corner_cfg, ['CW', 'Condition', 'Rule', 'Protocol'])
-    reward_col = get_column_name(corner_cfg, ['Water', 'Reward', 'Reward1'])
-    
-    if not rule_col:
-        print("  Error: Could not identify rule column for behavioral switch identification.")
-        return []
+    rule_col = 'CW'
+    reward_col = 'Water'
 
     for t_idx, t_switch in enumerate(switch_times):
-        # 1. Identify context
-        # Find corner events AFTER this rule switch
         post_switch_indices = np.where(corner_times_onsets >= t_switch)[0]
         
         if len(post_switch_indices) < 2:
             print(f"  Warning: Not enough corner events after switch {t_idx} at {t_switch:.1f}s.")
             continue
             
-        # Infer rule from the first corner event after the switch
         first_post_idx = post_switch_indices[0]
         rule_is_cw = bool(corner_df_onsets.iloc[first_post_idx][rule_col])
         rule_str = "CW" if rule_is_cw else "CCW"
-        
-        # 2. Find first correct trial after switch using subset indices
         found_correct = False
         
         # Filter indices to only those with valid ports (non-zero)
@@ -1108,12 +1102,8 @@ def _get_behavioral_switch_points(switch_times, corner_times_onsets, corner_ids_
             end_port = corner_ids_onsets[next_idx]
             
             if _is_move_correct(start_port, end_port, corner_order, rule_is_cw):
-                # We found the first correct trial!
                 trial_start_frame = corner_df_onsets.index[idx]
                 trial_end_frame = corner_df_onsets.index[next_idx]
-                
-                # REFINEMENT: SUCCESS ALIGNMENT (First reward at the end port)
-                # Search window: from arrival at port until departure or max 2s
                 trial_segment = corner_df_full.loc[trial_end_frame : trial_end_frame + 120] 
                 
                 success_time = None
@@ -1125,7 +1115,6 @@ def _get_behavioral_switch_points(switch_times, corner_times_onsets, corner_ids_
                 if success_time is None:
                     success_time = corner_times_onsets[next_idx]
                 
-                # REFINEMENT: DECISION ALIGNMENT (Departure from the previous port)
                 decision_time = None
                 start_port_col = f'Corner{start_port}'
                 if start_port_col in corner_df_full.columns:
@@ -1166,12 +1155,8 @@ def calculate_event_tuning(paths: DataPaths, event_file_type: str, time_window_m
     # --- 1. Load Event Data using modular loader ---
     try:
         config = load_dataset_config()
-        
-        # Load event data with proper synchronization
         base_path = paths.base_path
         event_loader = EventDataLoader(base_path, config)
-        
-        # Try to sync to DLC if available
         dlc_loader = None
         if paths.dlc_h5 and paths.dlc_h5.exists():
             try:
@@ -1584,7 +1569,7 @@ def calculate_lfp_peth(paths: DataPaths, event_file_type: str,
     # --- 2. Load LFP Data (Updated to use LFPDataLoader) ---
     try:
         config = load_dataset_config()
-        lfp_loader = LFPDataLoader(paths.base_path, config)
+        lfp_loader = LFPDataLoader(paths.lfp_dir, paths.kilosort_dir)
         if lfp_loader.extractor is None:
             print("  Error: LFP Extractor not initialized.")
             return None
@@ -1912,7 +1897,7 @@ def calculate_dopamine_peth(paths: DataPaths, event_file_type: str,
             return None
             
         photometry_loader = PhotometryDataLoader(base_path, config)
-        da_result = photometry_loader.load(dff_config_key=dff_config_key, raw_config_key=raw_config_key)
+        da_result = photometry_loader.load(paths.tdt_dff, paths.tdt_raw)
         
         da_signal = da_result['dff_values']
         da_times = da_result['dff_timestamps']
@@ -8009,7 +7994,7 @@ def analyze_lfp_movement_power(paths: DataPaths, time_window_ms: int = 1000, min
     # --- 2. Load LFP Data (Updated) ---
     try:
         config = load_dataset_config()
-        lfp_loader = LFPDataLoader(paths.base_path, config)
+        lfp_loader = LFPDataLoader(paths.lfp_dir, paths.kilosort_dir)
         if lfp_loader.extractor is None:
             print("  Error: LFP Extractor not initialized.")
             return
@@ -8186,7 +8171,7 @@ def analyze_theta_oscillations(paths: DataPaths, max_nav_duration_sec: int = 15)
     # --- 2. Load LFP Data (Updated to use LFPDataLoader) ---
     try:
         config = load_dataset_config()
-        lfp_loader = LFPDataLoader(paths.base_path, config)
+        lfp_loader = LFPDataLoader(paths.lfp_dir, paths.kilosort_dir)
         if lfp_loader.extractor is None:
             print("  Error: LFP Extractor not initialized.")
             return
@@ -8319,7 +8304,7 @@ def analyze_phase_amplitude_coupling(paths: DataPaths, phase_band=(4, 12), n_bin
     # --- 3. Initialize LFP ---
     try:
         config = load_dataset_config()
-        lfp_loader = LFPDataLoader(paths.base_path, config)
+        lfp_loader = LFPDataLoader(paths.lfp_dir, paths.kilosort_dir)
         if lfp_loader.extractor is None:
             print("  Error: LFP Extractor not initialized.")
             return
@@ -8432,7 +8417,7 @@ def analyze_cross_frequency_coupling(paths: DataPaths, phase_band=(4, 12), amp_b
     # --- 2. Load LFP Data (Updated to use LFPDataLoader) ---
     try:
         config = load_dataset_config()
-        lfp_loader = LFPDataLoader(paths.base_path, config)
+        lfp_loader = LFPDataLoader(paths.lfp_dir, paths.kilosort_dir)
         if lfp_loader.extractor is None:
              print("  Error: LFP Extractor not initialized.")
              return
@@ -8580,7 +8565,7 @@ def analyze_spike_phase_locking(paths: DataPaths, frequency_bands: dict = None,
     # --- 3. Initialize LFP Loader ---
     try:
         config = load_dataset_config()
-        lfp_loader = LFPDataLoader(paths.base_path, config)
+        lfp_loader = LFPDataLoader(paths.lfp_dir, paths.kilosort_dir)
         if lfp_loader.extractor is None:
             print("  Error: LFP Extractor not initialized.")
             return
@@ -9870,19 +9855,24 @@ def analyze_spike_pattern_motifs(paths: DataPaths, k_motifs=8, l_bins=20, binsiz
         try:
             # Load LFP
             config = load_dataset_config()
-            base_path = paths.base_path
-            lfp_loader = LFPDataLoader(base_path, config)
-            lfp_path = lfp_loader.get_lfp_path(paths.neural_base if paths.neural_base else base_path)
+            lfp_loader = LFPDataLoader(paths.lfp_dir, paths.kilosort_dir)
             
-            if lfp_path and lfp_path.exists():
-                n_channels = 384
-                bytes_per_sample = 2
-                file_size = lfp_path.stat().st_size
-                n_samples = file_size // (n_channels * bytes_per_sample)
-                lfp_mmap = np.memmap(lfp_path, dtype='int16', mode='r', shape=(n_samples, n_channels))
-                fs = _load_lfp_sampling_rate(lfp_path.parent)
-                ch_idx = n_channels // 2
-                lfp_trace = lfp_mmap[:, ch_idx]
+            if lfp_loader.extractor is not None:
+                fs = lfp_loader.fs
+                # Get middle channel
+                channel_ids = lfp_loader.extractor.get_channel_ids()
+                ch_idx = len(channel_ids) // 2
+                mid_channel_id = channel_ids[ch_idx]
+                
+                print(f"    Loaded LFP Extractor. Extracting trace from channel {mid_channel_id}...")
+                
+                # Extract full trace for this channel
+                # Note: get_traces returns (n_samples, n_channels)
+                lfp_trace = lfp_loader.extractor.get_traces(channel_ids=[mid_channel_id], return_scaled=False).flatten()
+                
+            else:
+                lfp_trace = None
+                print("    LFP Extractor failed to load.")
                 
                 # Filter Bands
                 from scipy.signal import butter, filtfilt, hilbert
@@ -9927,7 +9917,7 @@ def analyze_spike_pattern_motifs(paths: DataPaths, k_motifs=8, l_bins=20, binsiz
         try:
             config = load_dataset_config()
             photo_loader = PhotometryDataLoader(paths.base_path, config)
-            photo_data = photo_loader.load()
+            photo_data = photo_loader.load(paths.tdt_dff, paths.tdt_raw)
             
             dff = None
             ts = None
@@ -10159,7 +10149,7 @@ def analyze_wave_propagations(paths: DataPaths, freq_range: tuple = (5, 12), cha
     # --- 1. Load LFP Data and Config ---
     try:
         config = load_dataset_config()
-        lfp_loader = LFPDataLoader(paths.base_path, config)
+        lfp_loader = LFPDataLoader(paths.lfp_dir, paths.kilosort_dir)
         
         # Get LFP path
         lfp_path = lfp_loader.get_lfp_path(paths.neural_base if paths.neural_base else paths.base_path)
@@ -10192,7 +10182,7 @@ def analyze_wave_propagations(paths: DataPaths, freq_range: tuple = (5, 12), cha
         selected_pos_y = selected_pos_y[sorted_idx]
 
         # Load Spike Data for Phase Locking
-        spike_data = SpikeDataLoader(paths.base_path, config).load()
+        spike_data = SpikeDataLoader(paths.base_path, config).load(paths.kilosort_dir)
         unit_phases = defaultdict(list) # {unit_id: [phases...]}
         unit_wave_phases = defaultdict(list) # {unit_id: [phases_during_waves...]}
         
@@ -11445,7 +11435,7 @@ def analyze_dopamine_lfp_coupling(paths: DataPaths, lfp_bands: dict = {'theta': 
     # --- 2. Load LFP Data (Updated) ---
     try:
         config = load_dataset_config()
-        lfp_loader = LFPDataLoader(paths.base_path, config)
+        lfp_loader = LFPDataLoader(paths.lfp_dir, paths.kilosort_dir)
         if lfp_loader.extractor is None:
             print("  Error: LFP Extractor not initialized.")
             return
@@ -11634,22 +11624,12 @@ def analyze_dopamine_phase_locking_relationship(paths: DataPaths, frequency_band
         
         # Find dopamine config
         # Find dopamine config keys (dFF and RAW)
-        dff_config_key = None
-        raw_config_key = None
-        
-        for key, value in config.items():
-            path_str = value.get('path', '')
-            if 'dFF' in path_str and path_str.endswith('.mat'):
-                dff_config_key = key
-            elif 'UnivRAW' in path_str and path_str.endswith('.mat'):
-                raw_config_key = key
-                
-        if dff_config_key is None or raw_config_key is None:
-            print(f"  Error: Could not find dopamine keys. dFF: {dff_config_key}, RAW: {raw_config_key}")
+        if not paths.tdt_dff or not paths.tdt_raw:
+            print("  Error: Dopamine paths (dFF/RAW) not found.")
             return None
-        
+            
         # Load dopamine signal
-        da_data = photometry_loader.load(dff_config_key=dff_config_key, raw_config_key=raw_config_key)
+        da_data = photometry_loader.load(paths.tdt_dff, paths.tdt_raw)
         
         if da_data is None or len(da_data) == 0:
             print("  Error: Dopamine data is empty.")
@@ -11702,7 +11682,7 @@ def analyze_dopamine_phase_locking_relationship(paths: DataPaths, frequency_band
              print(f"  Error: LFP directory not found: {paths.lfp_dir}")
              return None
 
-        lfp_loader = LFPDataLoader(paths.base_path, config)
+        lfp_loader = LFPDataLoader(paths.lfp_dir, paths.kilosort_dir)
         if lfp_loader.extractor is None:
             print("  Error: LFP Extractor not initialized.")
             return None
@@ -13439,12 +13419,12 @@ def analyze_mutual_information(paths: DataPaths, n_behavioral_bins: int = 10,
     output_dir.mkdir(exist_ok=True, parents=True)
     
     # --- 1. Load Strobe Seconds (Frame Times) ---
-    strobe_path = paths.neural_base / 'kilosort4' / 'sorter_output' / 'strobe_seconds.npy'        
-    if not strobe_path.exists():
-        print("  Error: strobe_seconds.npy not found. Cannot align behavior.")
+    if not paths.strobe_seconds or not paths.strobe_seconds.exists():
+        print("  Error: strobe_seconds.npy not found in DataPaths. Cannot align behavior.")
         return
+        
     try:
-        strobe_seconds = np.load(strobe_path)
+        strobe_seconds = np.load(paths.strobe_seconds)
         print(f"  Loaded strobe_seconds: {len(strobe_seconds)} frames")
     except Exception as e:
         print(f"  Error loading strobe_seconds: {e}")
@@ -13471,10 +13451,9 @@ def analyze_mutual_information(paths: DataPaths, n_behavioral_bins: int = 10,
         event_loader = EventDataLoader(paths.base_path, config)
         
         # A. Corner (State) & Reward & Strategy
+
         if paths.event_corner and paths.event_corner.exists():
-            corner_config_entry = find_config_entry(paths.event_corner, config)
-            corner_config_key = next(k for k, v in config.items() if v == corner_config_entry)
-            corner_df = event_loader.load(config_key=corner_config_key)
+            corner_df = event_loader.load(paths.event_corner, sync_to_dlc=False)
             
             # Map Index to Time (Using strobe_seconds.npy as absolute master clock)
             # CRITICAL: Do NOT use 'Timestamp' or 'Time' from the CSV.
@@ -13542,9 +13521,7 @@ def analyze_mutual_information(paths: DataPaths, n_behavioral_bins: int = 10,
                 
         # B. Licking
         if paths.event_licking and paths.event_licking.exists():
-            lick_config_entry = find_config_entry(paths.event_licking, config)
-            lick_config_key = next(k for k, v in config.items() if v == lick_config_entry)
-            lick_df = event_loader.load(config_key=lick_config_key)
+            lick_df = event_loader.load(paths.event_licking, sync_to_dlc=False)
             
             # Use DataFrame index as it's set by EventDataLoader
             valid_indices = lick_df.index.values
@@ -13564,27 +13541,19 @@ def analyze_mutual_information(paths: DataPaths, n_behavioral_bins: int = 10,
                 behavior_data['Lick'] = (lick_binned > 0).astype(int)
         
         # C. Speed (DLC)
-        dlc_dir = paths.base_path / 'DLC'
-        dlc_files = list(dlc_dir.glob('*DLC*.h5'))
-            
-        if len(dlc_files) > 0:
-            import h5py
-            # Simple loading of first bodypart (e.g. Snout or Back)
-            # We need to assume DLC frames map 1-to-1 to strobe_seconds
-            df_dlc = pd.read_hdf(dlc_files[0])
-            # Flatten columns to find bodyparts
-            scorer = df_dlc.columns.levels[0][0]
-            bodyparts = df_dlc.columns.levels[1]
-            bp = 'Snout' if 'Snout' in bodyparts else bodyparts[0]
-            
-            x = df_dlc[scorer][bp]['x'].values
-            y = df_dlc[scorer][bp]['y'].values
-            
-            # Truncate to match strobe_seconds or vice versa
-            n_frames = min(len(x), len(strobe_seconds))
-            x = x[:n_frames]
-            y = y[:n_frames]
-            t = strobe_seconds[:n_frames]
+        if paths.dlc_h5 and paths.dlc_h5.exists():
+            dlc_loader = DLCDataLoader(paths.base_path, config)
+            try:
+                df_dlc = dlc_loader.load(paths.dlc_h5)
+                # Calculate velocity
+                velocity, v_times = dlc_loader.calculate_velocity(df_dlc, strobe_path=paths.strobe_seconds)
+                
+                # Resample to time bins
+                f_speed = interp1d(v_times, velocity, kind='linear', bounds_error=False, fill_value=0)
+                behavior_data['Speed'] = f_speed(bin_centers)
+                
+            except Exception as e:
+                print(f"  Error loading DLC/Speed: {e}")
             
             # Use _get_kinematic_states for robust Path and Speed extraction
             # This helper handles DLC loading, velocity calc, and state segmentation internally

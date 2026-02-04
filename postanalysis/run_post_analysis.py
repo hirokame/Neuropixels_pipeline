@@ -359,8 +359,6 @@ def run_dopamine_phase_locking_relationship_analysis(paths: DataPaths):
 
 
 
-
-
 def run_spatial_depth_analysis(paths: DataPaths):
     """Run spatial organization by depth analysis."""
     print("Running spatial depth analysis...")

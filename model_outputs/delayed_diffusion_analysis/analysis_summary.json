@@ -1,0 +1,31 @@
+{
+  "session": "1818_09182025_g0\\1818_09182025_g0_imec0",
+  "time_window": [
+    100.0,
+    105.0
+  ],
+  "coordinate_offset_y": 637.21533203125,
+  "n_spikes_analyzed": 5971,
+  "duration_sec": 5.0,
+  "n_recording_sites": 20,
+  "validation_metrics": {
+    "anisotropy_ratio": 0.21655748718656959,
+    "spatial_decay_lambda_um": 348.4419188398792,
+    "coherence_theta": 0.0,
+    "coherence_beta": 0.0
+  },
+  "model_parameters": {
+    "spatial_resolution_um": 20.0,
+    "time_step_ms": 0.05,
+    "diffusion_coefficient": 1.0,
+    "conduction_delay_ms": 5.0,
+    "anisotropy_ratio": 3.0
+  },
+  "dominant_frequencies": {
+    "channel_0": 200.0,
+    "channel_1": 200.0,
+    "channel_2": 200.0,
+    "channel_3": 200.0,
+    "channel_4": 200.0
+  }
+}
