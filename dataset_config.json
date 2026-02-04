@@ -1,0 +1,1411 @@
+{
+    "1818_09182025_g0_ct_offsets": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_ct_offsets.txt"
+    },
+    "1818_09182025_g0_fyi": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_fyi.txt"
+    },
+    "1818_09182025_g0_t0.imec0.ap": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\1818_09182025_g0_t0.imec0.ap.meta"
+    },
+    "1818_09182025_g0_t0.imec0.ap_kilosortChanMap": {
+        "loading_instructions": "Use scipy.io.loadmat(path)",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\1818_09182025_g0_t0.imec0.ap_kilosortChanMap.mat",
+        "variables": {
+            "chanMap": {
+                "dtype": "uint16",
+                "name": "chanMap",
+                "shape": [
+                    384
+                ]
+            },
+            "chanMap0ind": {
+                "dtype": "uint16",
+                "name": "chanMap0ind",
+                "shape": [
+                    384
+                ]
+            },
+            "connected": {
+                "dtype": "uint8",
+                "name": "connected",
+                "shape": [
+                    384
+                ]
+            },
+            "kcoords": {
+                "dtype": "uint8",
+                "name": "kcoords",
+                "shape": [
+                    384
+                ]
+            },
+            "name": {
+                "name": "name"
+            },
+            "xcoords": {
+                "dtype": "uint16",
+                "name": "xcoords",
+                "shape": [
+                    384
+                ]
+            },
+            "ycoords": {
+                "dtype": "uint16",
+                "name": "ycoords",
+                "shape": [
+                    384
+                ]
+            }
+        }
+    },
+    "1818_09182025_g0_t0.nidq": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_t0.nidq.meta"
+    },
+    "1818_09182025_g0_tcat.imec0.ap": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\1818_09182025_g0_tcat.imec0.ap.meta"
+    },
+    "1818_09182025_g0_tcat.imec0.ap.xd_384_6_500": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\1818_09182025_g0_tcat.imec0.ap.xd_384_6_500.txt"
+    },
+    "1818_09182025_g0_tcat.nidq": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_tcat.nidq.meta"
+    },
+    "1818_09182025_g0_tcat.nidq.xa_0_500": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_tcat.nidq.xa_0_500.txt"
+    },
+    "1818_250918_dFF": {
+        "loading_instructions": "Use scipy.io.loadmat(path)",
+        "path": "TDT\\250918\\1818_250918_dFF.mat",
+        "variables": {
+            "dFF": {
+                "name": "dFF"
+            }
+        }
+    },
+    "ACC": {
+        "error": "Failed to inspect NPY file: Array can't be memory-mapped: Python objects in dtype.",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\ACC.npy"
+    },
+    "Amplitude": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\Amplitude.npy",
+        "shape": [
+            243
+        ]
+    },
+    "ContamPct": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\ContamPct.npy",
+        "shape": [
+            243
+        ]
+    },
+    "Day12_1818_Clockwise2025-09-18T17_07_59": {
+        "path": "Video\\Day12_1818_Clockwise2025-09-18T17_07_59.avi"
+    },
+    "Day12_1818_Clockwise2025-09-18T17_07_59DLC_HrnetW32_openfield_v3Sep10shuffle2_detector_170_snapshot_160": {
+        "header_structure": {
+            "level_0_scorer": [
+                "DLC_HrnetW32_openfield_v3Sep10shuffle2_detector_170_snapshot_160"
+            ],
+            "level_1_bodyparts": [
+                "Snout",
+                "RF",
+                "LF",
+                "RH",
+                "LH",
+                "Tail"
+            ],
+            "level_2_coords": [
+                "x",
+                "y",
+                "likelihood"
+            ]
+        },
+        "loading_instructions": "Use pandas.read_hdf(path)",
+        "path": "DLC\\Day12_1818_Clockwise2025-09-18T17_07_59DLC_HrnetW32_openfield_v3Sep10shuffle2_detector_170_snapshot_160.h5"
+    },
+    "Day12_1818_Clockwise_corner_2025-09-18T17_07_59": {
+        "columns": [
+            {
+                "dtype": "bool",
+                "name": "Corner1"
+            },
+            {
+                "dtype": "bool",
+                "name": "Corner2"
+            },
+            {
+                "dtype": "bool",
+                "name": "Corner3"
+            },
+            {
+                "dtype": "bool",
+                "name": "Corner4"
+            },
+            {
+                "dtype": "int64",
+                "name": "Index"
+            },
+            {
+                "dtype": "int64",
+                "name": "Timestamp"
+            },
+            {
+                "dtype": "bool",
+                "name": "TrialStart"
+            },
+            {
+                "dtype": "bool",
+                "name": "Water"
+            },
+            {
+                "dtype": "bool",
+                "name": "CW"
+            },
+            {
+                "dtype": "bool",
+                "name": "Stim"
+            }
+        ],
+        "path": "Event\\Day12_1818_Clockwise_corner_2025-09-18T17_07_59.csv"
+    },
+    "Day12_1818_Clockwise_licking_2025-09-18T17_07_59": {
+        "columns": [
+            {
+                "dtype": "bool",
+                "name": "Lick1"
+            },
+            {
+                "dtype": "bool",
+                "name": "Lick2"
+            },
+            {
+                "dtype": "bool",
+                "name": "Lick3"
+            },
+            {
+                "dtype": "bool",
+                "name": "Lick4"
+            },
+            {
+                "dtype": "int64",
+                "name": "Index"
+            }
+        ],
+        "path": "Event\\Day12_1818_Clockwise_licking_2025-09-18T17_07_59.csv"
+    },
+    "ISI": {
+        "error": "Failed to inspect NPY file: Array can't be memory-mapped: Python objects in dtype.",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\ISI.npy"
+    },
+    "KSLabel": {
+        "dtype": "<U4",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\KSLabel.npy",
+        "shape": [
+            243
+        ]
+    },
+    "KSLabel_repeat": {
+        "dtype": "<U4",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\KSLabel_repeat.npy",
+        "shape": [
+            243
+        ]
+    },
+    "SNR": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\SNR.npy",
+        "shape": [
+            243
+        ]
+    },
+    "Session_Mouse-250918-170624_UnivRAW_offdemod": {
+        "error": "Failed to inspect MAT file: Please use HDF reader for matlab v7.3 files, e.g. h5py",
+        "path": "TDT\\250918\\Session_Mouse-250918-170624_UnivRAW_offdemod.mat"
+    },
+    "Trialstart_seconds": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\Trialstart_seconds.npy",
+        "shape": [
+            0
+        ]
+    },
+    "Trialstart_times": {
+        "dtype": "int64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\Trialstart_times.npy",
+        "shape": [
+            0
+        ]
+    },
+    "X_binned": {
+        "dtype": "float32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\rastermap\\msn_only\\X_binned.npy",
+        "shape": [
+            62,
+            67249
+        ]
+    },
+    "_bc_parameters._bc_qMetrics": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\_bc_parameters._bc_qMetrics.parquet"
+    },
+    "amplitudes": {
+        "description": "Amplitude of each individual spike.",
+        "dtype": "float32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\amplitudes.npy",
+        "shape": [
+            3300392
+        ]
+    },
+    "average": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\extensions\\templates\\average.npy",
+        "shape": [
+            243,
+            88,
+            382
+        ]
+    },
+    "bc_unitType": {
+        "dtype": "<U8",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\bc_unitType.npy",
+        "shape": [
+            243
+        ]
+    },
+    "binary": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\LFP\\binary.json"
+    },
+    "chanMap": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\chanMap.json"
+    },
+    "channel_map": {
+        "dtype": "int32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\channel_map.npy",
+        "shape": [
+            384
+        ]
+    },
+    "channel_name": {
+        "dtype": "<U64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\LFP\\properties\\channel_name.npy",
+        "shape": [
+            384
+        ]
+    },
+    "channel_positions": {
+        "dtype": "float32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\channel_positions.npy",
+        "shape": [
+            384,
+            2
+        ]
+    },
+    "channel_shanks": {
+        "dtype": "float32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\channel_shanks.npy",
+        "shape": [
+            384
+        ]
+    },
+    "cluster_Amplitude": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "cluster_id"
+            },
+            {
+                "dtype": "float64",
+                "name": "Amplitude"
+            }
+        ],
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\cluster_Amplitude.tsv"
+    },
+    "cluster_ContamPct": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "cluster_id"
+            },
+            {
+                "dtype": "float64",
+                "name": "ContamPct"
+            }
+        ],
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\cluster_ContamPct.tsv"
+    },
+    "cluster_KSLabel": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "cluster_id"
+            },
+            {
+                "dtype": "object",
+                "name": "KSLabel"
+            }
+        ],
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\cluster_KSLabel.tsv"
+    },
+    "cluster_SNR": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "cluster_id"
+            },
+            {
+                "dtype": "float64",
+                "name": "SNR"
+            }
+        ],
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\cluster_SNR.tsv"
+    },
+    "cluster_bc_unitType": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "cluster_id"
+            },
+            {
+                "dtype": "object",
+                "name": "bc_unitType"
+            }
+        ],
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\cluster_bc_unitType.tsv"
+    },
+    "cluster_frac_RPVs": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "cluster_id"
+            },
+            {
+                "dtype": "float64",
+                "name": "frac_RPVs"
+            }
+        ],
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\cluster_frac_RPVs.tsv"
+    },
+    "cluster_group": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "cluster_id"
+            },
+            {
+                "dtype": "object",
+                "name": "KSLabel"
+            }
+        ],
+        "description": "Original KiloSort cluster group (e.g., 'good', 'mua').",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\cluster_group.tsv"
+    },
+    "cluster_ids": {
+        "dtype": "int32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\rastermap\\msn_only\\cluster_ids.npy",
+        "shape": [
+            62
+        ]
+    },
+    "cluster_max_drift": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "cluster_id"
+            },
+            {
+                "dtype": "float64",
+                "name": "max_drift"
+            }
+        ],
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\cluster_max_drift.tsv"
+    },
+    "cluster_n_peaks": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "cluster_id"
+            },
+            {
+                "dtype": "int64",
+                "name": "n_peaks"
+            }
+        ],
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\cluster_n_peaks.tsv"
+    },
+    "cluster_n_troughs": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "cluster_id"
+            },
+            {
+                "dtype": "int64",
+                "name": "n_troughs"
+            }
+        ],
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\cluster_n_troughs.tsv"
+    },
+    "cluster_peak_1_to_peak_2": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "cluster_id"
+            },
+            {
+                "dtype": "float64",
+                "name": "peak_1_to_peak_2"
+            }
+        ],
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\cluster_peak_1_to_peak_2.tsv"
+    },
+    "cluster_peak_2_to_trough": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "cluster_id"
+            },
+            {
+                "dtype": "float64",
+                "name": "peak_2_to_trough"
+            }
+        ],
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\cluster_peak_2_to_trough.tsv"
+    },
+    "cluster_peak_main_to_trough": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "cluster_id"
+            },
+            {
+                "dtype": "float64",
+                "name": "peak_main_to_trough"
+            }
+        ],
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\cluster_peak_main_to_trough.tsv"
+    },
+    "cluster_percentage_spikes_missing": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "cluster_id"
+            },
+            {
+                "dtype": "float64",
+                "name": "percentage_spikes_missing"
+            }
+        ],
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\cluster_percentage_spikes_missing.tsv"
+    },
+    "cluster_presence_ratio": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "cluster_id"
+            },
+            {
+                "dtype": "float64",
+                "name": "presence_ratio"
+            }
+        ],
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\cluster_presence_ratio.tsv"
+    },
+    "cluster_spatial_decay_slope": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "cluster_id"
+            },
+            {
+                "dtype": "float64",
+                "name": "spatial_decay_slope"
+            }
+        ],
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\cluster_spatial_decay_slope.tsv"
+    },
+    "cluster_waveform_duration": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "cluster_id"
+            },
+            {
+                "dtype": "float64",
+                "name": "waveform_duration"
+            }
+        ],
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\cluster_waveform_duration.tsv"
+    },
+    "cluster_wv_baseline_flatness": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "cluster_id"
+            },
+            {
+                "dtype": "float64",
+                "name": "wv_baseline_flatness"
+            }
+        ],
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\cluster_wv_baseline_flatness.tsv"
+    },
+    "contact_vector": {
+        "dtype": "[('probe_index', '<i8'), ('x', '<f8'), ('y', '<f8'), ('contact_shapes', '<U64'), ('width', '<f8'), ('shank_ids', '<U64'), ('contact_ids', '<U64'), ('device_channel_indices', '<i8'), ('si_units', '<U64'), ('plane_axis_x_0', '<f8'), ('plane_axis_x_1', '<f8'), ('plane_axis_y_0', '<f8'), ('plane_axis_y_1', '<f8'), ('channel_ids', '<i4'), ('banks', '<i4'), ('references', '<i4')]",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\LFP\\properties\\contact_vector.npy",
+        "shape": [
+            384
+        ]
+    },
+    "embedding": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\rastermap\\msn_only\\embedding.npy",
+        "shape": [
+            62,
+            1
+        ]
+    },
+    "frac_RPVs": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\frac_RPVs.npy",
+        "shape": [
+            243
+        ]
+    },
+    "gain_to_physical_unit": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\LFP\\properties\\gain_to_physical_unit.npy",
+        "shape": [
+            384
+        ]
+    },
+    "gain_to_uV": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\LFP\\properties\\gain_to_uV.npy",
+        "shape": [
+            384
+        ]
+    },
+    "group": {
+        "dtype": "int64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\LFP\\properties\\group.npy",
+        "shape": [
+            384
+        ]
+    },
+    "info": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\extensions\\waveforms\\info.json"
+    },
+    "inter_sample_shift": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\LFP\\properties\\inter_sample_shift.npy",
+        "shape": [
+            384
+        ]
+    },
+    "isort": {
+        "dtype": "int64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\rastermap\\msn_only\\isort.npy",
+        "shape": [
+            62
+        ]
+    },
+    "kept_spikes": {
+        "dtype": "bool",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\kept_spikes.npy",
+        "shape": [
+            3307308
+        ]
+    },
+    "kilosort4": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\kilosort4.log"
+    },
+    "lfp_sanity_check": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\LFP\\lfp_sanity_check.png"
+    },
+    "licking_seconds": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\licking_seconds.npy",
+        "shape": [
+            2184
+        ]
+    },
+    "licking_times": {
+        "dtype": "int64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\licking_times.npy",
+        "shape": [
+            2184
+        ]
+    },
+    "location": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\LFP\\properties\\location.npy",
+        "shape": [
+            384,
+            2
+        ]
+    },
+    "max_drift": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\max_drift.npy",
+        "shape": [
+            243
+        ]
+    },
+    "median": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\extensions\\templates\\median.npy",
+        "shape": [
+            243,
+            88,
+            382
+        ]
+    },
+    "movement_tuning_curves": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "cluster_id"
+            },
+            {
+                "dtype": "float64",
+                "name": "1.71 cm/s"
+            },
+            {
+                "dtype": "float64",
+                "name": "16.81 cm/s"
+            },
+            {
+                "dtype": "float64",
+                "name": "31.90 cm/s"
+            },
+            {
+                "dtype": "float64",
+                "name": "47.00 cm/s"
+            },
+            {
+                "dtype": "float64",
+                "name": "62.10 cm/s"
+            },
+            {
+                "dtype": "float64",
+                "name": "77.19 cm/s"
+            },
+            {
+                "dtype": "float64",
+                "name": "92.29 cm/s"
+            },
+            {
+                "dtype": "float64",
+                "name": "107.38 cm/s"
+            },
+            {
+                "dtype": "float64",
+                "name": "122.48 cm/s"
+            },
+            {
+                "dtype": "float64",
+                "name": "137.57 cm/s"
+            },
+            {
+                "dtype": "float64",
+                "name": "152.67 cm/s"
+            },
+            {
+                "dtype": "float64",
+                "name": "167.76 cm/s"
+            },
+            {
+                "dtype": "float64",
+                "name": "182.86 cm/s"
+            },
+            {
+                "dtype": "float64",
+                "name": "197.96 cm/s"
+            },
+            {
+                "dtype": "float64",
+                "name": "213.05 cm/s"
+            },
+            {
+                "dtype": "float64",
+                "name": "228.15 cm/s"
+            },
+            {
+                "dtype": "float64",
+                "name": "243.24 cm/s"
+            },
+            {
+                "dtype": "float64",
+                "name": "258.34 cm/s"
+            },
+            {
+                "dtype": "float64",
+                "name": "273.43 cm/s"
+            },
+            {
+                "dtype": "float64",
+                "name": "288.53 cm/s"
+            }
+        ],
+        "description": "CSV file where each row is a neuron and columns are firing rates at different movement velocities.",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\post_analysis\\movement_tuning_curves.csv"
+    },
+    "movement_tuning_summary": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\post_analysis\\movement_tuning_summary.png"
+    },
+    "n_peaks": {
+        "dtype": "int64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\n_peaks.npy",
+        "shape": [
+            243
+        ]
+    },
+    "n_troughs": {
+        "dtype": "int64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\n_troughs.npy",
+        "shape": [
+            243
+        ]
+    },
+    "numpysorting_info": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\numpysorting_info.json"
+    },
+    "offset_to_physical_unit": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\LFP\\properties\\offset_to_physical_unit.npy",
+        "shape": [
+            384
+        ]
+    },
+    "offset_to_uV": {
+        "dtype": "int32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\LFP\\properties\\offset_to_uV.npy",
+        "shape": [
+            384
+        ]
+    },
+    "ops": {
+        "error": "Failed to inspect NPY file: Array can't be memory-mapped: Python objects in dtype.",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\ops.npy"
+    },
+    "original_cluster_id": {
+        "dtype": "int64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\original_cluster_id.npy",
+        "shape": [
+            243
+        ]
+    },
+    "params": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\params.py"
+    },
+    "pc_feature_ind": {
+        "dtype": "uint32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\pc_feature_ind.npy",
+        "shape": [
+            243,
+            10
+        ]
+    },
+    "pc_features": {
+        "description": "Principal component features for each spike, used for clustering.",
+        "dtype": "float32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\pc_features.npy",
+        "shape": [
+            3300392,
+            6,
+            10
+        ]
+    },
+    "peak_1_to_peak_2": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\peak_1_to_peak_2.npy",
+        "shape": [
+            243
+        ]
+    },
+    "peak_2_to_trough": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\peak_2_to_trough.npy",
+        "shape": [
+            243
+        ]
+    },
+    "peak_main_to_trough": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\peak_main_to_trough.npy",
+        "shape": [
+            243
+        ]
+    },
+    "percentage_spikes_missing": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\percentage_spikes_missing.npy",
+        "shape": [
+            243
+        ]
+    },
+    "physical_unit": {
+        "dtype": "<U64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\LFP\\properties\\physical_unit.npy",
+        "shape": [
+            384
+        ]
+    },
+    "presence_ratio": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\presence_ratio.npy",
+        "shape": [
+            243
+        ]
+    },
+    "probe": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\LFP\\probe.json"
+    },
+    "probegroup": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\recording_info\\probegroup.json"
+    },
+    "provenance": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\LFP\\provenance.json"
+    },
+    "random_spikes_indices": {
+        "dtype": "int64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\extensions\\random_spikes\\random_spikes_indices.npy",
+        "shape": [
+            111532
+        ]
+    },
+    "rastermap_heatmap": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\rastermap\\msn_only\\rastermap_heatmap.png"
+    },
+    "rastermap_raster": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\rastermap\\msn_only\\rastermap_raster.png"
+    },
+    "rastermap_spatial": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\rastermap\\msn_only\\rastermap_spatial.png"
+    },
+    "recording": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\recording.json"
+    },
+    "recording_attributes": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\recording_info\\recording_attributes.json"
+    },
+    "reward_seconds": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\reward_seconds.npy",
+        "shape": [
+            104
+        ]
+    },
+    "reward_times": {
+        "dtype": "int64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\reward_times.npy",
+        "shape": [
+            104
+        ]
+    },
+    "rulebased_celltype_scatter": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\rulebased_celltype_scatter.png"
+    },
+    "rulebased_celltype_waveforms": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\rulebased_celltype_waveforms.png"
+    },
+    "run_info": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\extensions\\waveforms\\run_info.json"
+    },
+    "settings": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\settings.json"
+    },
+    "si_folder": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\LFP\\si_folder.json"
+    },
+    "similar_templates": {
+        "dtype": "float32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\similar_templates.npy",
+        "shape": [
+            243,
+            243
+        ]
+    },
+    "sorting_provenance": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting_provenance.json"
+    },
+    "sparsity_mask": {
+        "dtype": "bool",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sparsity_mask.npy",
+        "shape": [
+            243,
+            382
+        ]
+    },
+    "spatial_decay_slope": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\spatial_decay_slope.npy",
+        "shape": [
+            243
+        ]
+    },
+    "spike_clusters": {
+        "description": "The cluster/unit ID for each spike. Corresponds 1:1 with spike_times.",
+        "dtype": "int32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\spike_clusters.npy",
+        "relationship": {
+            "target": "spike_times",
+            "type": "one_to_one_indexed"
+        },
+        "shape": [
+            3300392
+        ]
+    },
+    "spike_detection_templates": {
+        "dtype": "int32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\spike_detection_templates.npy",
+        "shape": [
+            3300392
+        ]
+    },
+    "spike_mask": {
+        "dtype": "bool",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\spike_mask.npy",
+        "shape": [
+            3300392
+        ]
+    },
+    "spike_positions": {
+        "dtype": "float32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\spike_positions.npy",
+        "shape": [
+            3300392,
+            2
+        ]
+    },
+    "spike_seconds": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\spike_seconds.npy",
+        "shape": [
+            3300392
+        ]
+    },
+    "spike_seconds_adj": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\spike_seconds_adj.npy",
+        "shape": [
+            3300392
+        ]
+    },
+    "spike_templates": {
+        "dtype": "int32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\spike_templates.npy",
+        "shape": [
+            3300392
+        ]
+    },
+    "spike_times": {
+        "description": "Timestamps of individual spikes, in seconds. Corresponds 1:1 with spike_clusters.",
+        "dtype": "int64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\spike_times.npy",
+        "relationship": {
+            "target": "spike_clusters",
+            "type": "one_to_one_indexed"
+        },
+        "shape": [
+            3300392
+        ]
+    },
+    "spikeinterface_info": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\spikeinterface_info.json"
+    },
+    "spikeinterface_log": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\spikeinterface_log.json"
+    },
+    "spikeinterface_params": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\spikeinterface_params.json"
+    },
+    "spikeinterface_recording": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\spikeinterface_recording.json"
+    },
+    "spikes": {
+        "dtype": "[('sample_index', '<i8'), ('unit_index', '<i8'), ('segment_index', '<i8')]",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\spikes.npy",
+        "shape": [
+            3300392
+        ]
+    },
+    "stimulation_off_seconds": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\stimulation_off_seconds.npy",
+        "shape": [
+            1
+        ]
+    },
+    "stimulation_off_times": {
+        "dtype": "int64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\stimulation_off_times.npy",
+        "shape": [
+            1
+        ]
+    },
+    "stimulation_seconds": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\stimulation_seconds.npy",
+        "shape": [
+            1
+        ]
+    },
+    "stimulation_times": {
+        "dtype": "int64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\stimulation_times.npy",
+        "shape": [
+            1
+        ]
+    },
+    "strobe_seconds": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\strobe_seconds.npy",
+        "shape": [
+            200008
+        ]
+    },
+    "strobe_times": {
+        "dtype": "int64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\strobe_times.npy",
+        "shape": [
+            200008
+        ]
+    },
+    "template_metrics": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "unit_id"
+            },
+            {
+                "dtype": "float64",
+                "name": "peak_to_valley"
+            },
+            {
+                "dtype": "float64",
+                "name": "peak_trough_ratio"
+            },
+            {
+                "dtype": "float64",
+                "name": "half_width"
+            },
+            {
+                "dtype": "float64",
+                "name": "repolarization_slope"
+            },
+            {
+                "dtype": "float64",
+                "name": "recovery_slope"
+            },
+            {
+                "dtype": "int64",
+                "name": "num_positive_peaks"
+            },
+            {
+                "dtype": "int64",
+                "name": "num_negative_peaks"
+            },
+            {
+                "dtype": "float64",
+                "name": "velocity_above"
+            },
+            {
+                "dtype": "float64",
+                "name": "velocity_below"
+            },
+            {
+                "dtype": "float64",
+                "name": "exp_decay"
+            },
+            {
+                "dtype": "int64",
+                "name": "spread"
+            }
+        ],
+        "description": "CSV file with waveform metrics (e.g., peak-to-valley) for each unit.",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\template_metrics.csv"
+    },
+    "templates": {
+        "description": "Waveform templates used by Kilosort.",
+        "dtype": "float32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\templates.npy",
+        "shape": [
+            243,
+            61,
+            384
+        ]
+    },
+    "templates._bc_baselineNoiseAmplitudeIndex_kilosort_format": {
+        "description": "Waveform templates used by Kilosort.",
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\templates._bc_baselineNoiseAmplitudeIndex_kilosort_format.npy",
+        "shape": [
+            2440,
+            1
+        ]
+    },
+    "templates._bc_baselineNoiseAmplitude_kilosort_format": {
+        "description": "Waveform templates used by Kilosort.",
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\templates._bc_baselineNoiseAmplitude_kilosort_format.npy",
+        "shape": [
+            2440,
+            1
+        ]
+    },
+    "templates._bc_fractionRefractoryPeriodViolationsPerTauR": {
+        "description": "Waveform templates used by Kilosort.",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\templates._bc_fractionRefractoryPeriodViolationsPerTauR.parquet"
+    },
+    "templates._bc_qMetrics": {
+        "description": "Waveform templates used by Kilosort.",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\templates._bc_qMetrics.parquet"
+    },
+    "templates._bc_rawWaveformPeakChannels": {
+        "description": "Waveform templates used by Kilosort.",
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\templates._bc_rawWaveformPeakChannels.npy",
+        "shape": [
+            243,
+            1
+        ]
+    },
+    "templates._bc_rawWaveformPeakChannels_kilosort_format": {
+        "description": "Waveform templates used by Kilosort.",
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\templates._bc_rawWaveformPeakChannels_kilosort_format.npy",
+        "shape": [
+            243,
+            1
+        ]
+    },
+    "templates._bc_rawWaveforms": {
+        "description": "Waveform templates used by Kilosort.",
+        "dtype": "float32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\templates._bc_rawWaveforms.npy",
+        "shape": [
+            243,
+            383,
+            61
+        ]
+    },
+    "templates._bc_rawWaveforms_kilosort_format": {
+        "description": "Waveform templates used by Kilosort.",
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\templates._bc_rawWaveforms_kilosort_format.npy",
+        "shape": [
+            243,
+            383,
+            61
+        ]
+    },
+    "templates._bc_unit_labels": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "unitType"
+            }
+        ],
+        "description": "Bombcell quality metrics. Primary quality control file.",
+        "loading_instructions": "Load as TSV. The row index (0-based) IS the unit_id.",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\templates._bc_unit_labels.tsv",
+        "relationship": {
+            "target": "spike_clusters",
+            "type": "metadata_for"
+        }
+    },
+    "templates.qualityMetricDetailsforGUI": {
+        "description": "Waveform templates used by Kilosort.",
+        "error": "Failed to inspect MAT file: Please use HDF reader for matlab v7.3 files, e.g. h5py",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4qMetrics\\templates.qualityMetricDetailsforGUI.mat"
+    },
+    "templates_ind": {
+        "description": "Waveform templates used by Kilosort.",
+        "dtype": "int32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\templates_ind.npy",
+        "shape": [
+            243,
+            384
+        ]
+    },
+    "traces_cached_seg0": {
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\LFP\\traces_cached_seg0.raw"
+    },
+    "unitType": {
+        "dtype": "int64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\unitType.npy",
+        "shape": [
+            243
+        ]
+    },
+    "unit_classification_rulebased": {
+        "columns": [
+            {
+                "dtype": "int64",
+                "name": "unit_id"
+            },
+            {
+                "dtype": "float64",
+                "name": "peak_to_valley"
+            },
+            {
+                "dtype": "float64",
+                "name": "half_width"
+            },
+            {
+                "dtype": "object",
+                "name": "cell_type"
+            }
+        ],
+        "description": "A secondary classification of units into cell types based on waveform metrics.",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\unit_classification_rulebased.csv"
+    },
+    "used_spikes": {
+        "dtype": "[('sample_index', '<i8'), ('unit_index', '<i8'), ('segment_index', '<i8')]",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\extensions\\waveforms\\used_spikes.npy",
+        "shape": [
+            111532
+        ]
+    },
+    "waveform_beh_average": {
+        "error": "Failed to inspect NPY file: Array can't be memory-mapped: Python objects in dtype.",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\waveform_beh_average.npy"
+    },
+    "waveform_beh_median": {
+        "error": "Failed to inspect NPY file: Array can't be memory-mapped: Python objects in dtype.",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\waveform_beh_median.npy"
+    },
+    "waveform_duration": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\waveform_duration.npy",
+        "shape": [
+            243
+        ]
+    },
+    "waveforms": {
+        "dtype": "float32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\extensions\\waveforms\\waveforms.npy",
+        "shape": [
+            111532,
+            88,
+            26
+        ]
+    },
+    "whitening_mat": {
+        "description": "Whitening matrix used by Kilosort during spike sorting.",
+        "dtype": "float32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\whitening_mat.npy",
+        "shape": [
+            384,
+            384
+        ]
+    },
+    "whitening_mat_dat": {
+        "description": "Whitening matrix used by Kilosort during spike sorting.",
+        "dtype": "float32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\whitening_mat_dat.npy",
+        "shape": [
+            384,
+            384
+        ]
+    },
+    "whitening_mat_inv": {
+        "description": "Whitening matrix used by Kilosort during spike sorting.",
+        "dtype": "float32",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\kilosort4\\sorter_output\\whitening_mat_inv.npy",
+        "shape": [
+            384,
+            384
+        ]
+    },
+    "wv_baseline_flatness": {
+        "dtype": "float64",
+        "loading_instructions": "Use numpy.load(path, mmap_mode='r')",
+        "path": "1818_09182025_g0\\1818_09182025_g0_imec0\\analyzer_beh\\sorting\\properties\\wv_baseline_flatness.npy",
+        "shape": [
+            243
+        ]
+    }
+}

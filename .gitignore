@@ -1,0 +1,27 @@
+# === Big data / analysis outputs ===
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+*.bin
+*.dat
+
+# SpikeInterface outputs & waveform extractions
+pipeline/spikeinterface_waveform_extraction/
+pipeline/Unitmatch/for_RawWaveform_extraction/
+DemoData/
+
+# Model outputs directories
+model_outputs/
+quick_start_outputs/
+
+# === Python cache / misc ===
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Env stuff
+.env
+.venv/

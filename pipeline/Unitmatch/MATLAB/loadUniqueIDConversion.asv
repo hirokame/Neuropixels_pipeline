@@ -1,0 +1,27 @@
+matFilePath = "E:\Dropbox_transfer\Neuropixels\9153\RESULT0616\UnitMatch.mat";
+UMmatfile = load(matFilePath);
+[filepath, ~, ~] = fileparts(matFilePath);
+save_path = "E:\Dropbox_transfer\Neuropixels\9153\RESULT0502_all";
+disp(save_path)
+uniqueIDStruct = UniqueIDConversion;
+varNames = {'UniqueID', 'OriginalClusID', 'recsesAll', 'GoodID'};
+
+for i = 1:length(varNames)
+    varName = varNames{i};
+    if isfield(uniqueIDStruct, varName)
+        varData = uniqueIDStruct.(varName);
+        if size(varData, 1) == 1 && size(varData, 2) > 1
+            varData = varData';
+        elseif size(varData, 1) > 1 && size(varData, 2) > 1
+            varData = varData(:);
+        end
+        csvFileName = fullfile(save_path, [varName '.csv']);
+        
+        % 保存为CSV文件
+        writematrix(varData, csvFileName);
+        
+        fprintf('已保存 %s 到 %s\n', varName, csvFileName);
+    else
+        fprintf('警告: %s 不存在于UniqueIDConversion中\n', varName);
+    end
+end
