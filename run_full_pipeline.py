@@ -780,6 +780,10 @@ def build_spike_mask(
 
 def export_waveforms_and_metrics(session: Dict[str, Path], dry_run: bool) -> None:
     ks_dir = session["ks_dir"]
+    if (ks_dir / "ACC.npy").exists():
+        log(f"[{session['session_name']}] ACC.npy already exists, skipping export")
+        return
+
     if not ks_dir.exists():
         log(f"[{session['session_name']}] missing kilosort4 folder, skip waveform export")
         return
