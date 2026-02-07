@@ -29,137 +29,6 @@ import warnings
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-@lru_cache(maxsize=1)
-def load_dataset_config() -> Dict[str, Any]:
-    """Load dataset_config.json from the project root."""
-    config_path = Path(__file__).resolve().parent.parent / 'dataset_config.json'
-    if not config_path.exists():
-        raise FileNotFoundError(f"dataset_config.json not found at {config_path}")
-    
-    with open(config_path, 'r') as f:
-        config = json.load(f)
-    
-    logger.info(f"Loaded dataset_config.json with {len(config)} entries")
-    return config
-
-
-def find_config_entry(file_path: Path, config: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
-    """
-    Find the configuration entry for a given file path.
-    
-    Args:
-        file_path: Path to the file
-        config: Optional pre-loaded config dict (for efficiency)
-    
-    Returns:
-        Config entry dict or None if not found
-    """
-    if config is None:
-        config = load_dataset_config()
-    
-    if not file_path or not file_path.exists():
-        return None
-    
-    # Normalize path for matching
-    file_path_str = str(file_path.as_posix())
-    
-    for key, value in config.items():
-        config_path_str = value.get('path', '').replace('\\', '/')
-        if config_path_str and file_path_str.endswith(config_path_str):
-            return value
-    
-    return None
-
-
-def get_column_name(config: Dict[str, Any], potential_names: List[str]) -> Optional[str]:
-    """
-    Get the correct column name from config based on potential names.
-    
-    Args:
-        config: Config entry dict
-        potential_names: List of potential column name variations
-    
-    Returns:
-        Actual column name from config or None
-    """
-    if not config or 'columns' not in config:
-        return None
-    
-    # Create case-insensitive mapping
-    config_cols = {c['name'].lower(): c['name'] for c in config['columns']}
-    
-    for name in potential_names:
-        if name.lower() in config_cols:
-            return config_cols[name.lower()]
-    
-    return None
-
-
-def validate_schema(file_path: Path, loaded_data: Any, config: Dict[str, Any]) -> bool:
-    """
-    Validate that loaded data matches the schema defined in config.
-    
-    Args:
-        file_path: Path to the file
-        loaded_data: The loaded data (DataFrame, array, etc.)
-        config: Config entry dict
-    
-    Returns:
-        True if valid, raises ValueError if invalid
-    """
-    if 'columns' in config:
-        # Validate CSV/TSV columns
-        if isinstance(loaded_data, pd.DataFrame):
-            expected_cols = {c['name'] for c in config['columns']}
-            actual_cols = set(loaded_data.columns)
-            
-            missing_cols = expected_cols - actual_cols
-            if missing_cols:
-                error_msg = (
-                    f"Schema validation failed for {file_path}:\n"
-                    f"Missing columns: {missing_cols}\n"
-                    f"Expected: {expected_cols}\n"
-                    f"Actual: {actual_cols}"
-                )
-                logger.error(error_msg)
-                raise ValueError(error_msg)
-            
-            # Validate dtypes if specified
-            for col_def in config['columns']:
-                col_name = col_def['name']
-                if col_name in loaded_data.columns and 'dtype' in col_def:
-                    expected_dtype = col_def['dtype']
-                    actual_dtype = str(loaded_data[col_name].dtype)
-                    # Allow some flexibility in dtype matching
-                    if not _dtype_matches(expected_dtype, actual_dtype):
-                        logger.warning(
-                            f"Column {col_name} dtype mismatch: expected {expected_dtype}, got {actual_dtype}"
-                        )
-    
-    if 'dtype' in config and isinstance(loaded_data, np.ndarray):
-        expected_dtype = config['dtype']
-        actual_dtype = str(loaded_data.dtype)
-        if not _dtype_matches(expected_dtype, actual_dtype):
-            logger.warning(
-                f"Array dtype mismatch: expected {expected_dtype}, got {actual_dtype}"
-            )
-    
-    if 'shape' in config and isinstance(loaded_data, np.ndarray):
-        expected_shape = tuple(config['shape'])
-        actual_shape = loaded_data.shape
-        # Allow flexible shape matching (e.g., if one dimension is variable)
-        if len(expected_shape) != len(actual_shape):
-            error_msg = (
-                f"Schema validation failed for {file_path}:\n"
-                f"Shape mismatch: expected {expected_shape}, got {actual_shape}"
-            )
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-    
-    return True
-
-
 def _dtype_matches(expected: str, actual: str) -> bool:
     """Check if dtypes match (with some flexibility)."""
     # Normalize dtypes
@@ -169,41 +38,26 @@ def _dtype_matches(expected: str, actual: str) -> bool:
         'bool': ['bool', 'bool_'],
         '<U4': ['<U4', 'object', 'str'],
     }
-    
     for key, variants in dtype_map.items():
         if expected in variants and actual in variants:
             return True
-    
     return expected == actual
 
 
 class DataStreamLoader:
     """
-    Base class for loading individual data streams with proper validation.
+    Base class for loading individual data streams.
+    Reference base_path for resolving relative paths if needed.
     """
-    
-    def __init__(self, base_path: Path, config: Optional[Dict] = None):
+    def __init__(self, base_path: Path):
         self.base_path = Path(base_path)
-        self.config = config if config is not None else load_dataset_config()
     
-    def _get_file_path(self, config_key: str) -> Optional[Path]:
-        """
-        Get full file path from config key.
-        """
-        if config_key not in self.config:
-            return None
-        
-        config_entry = self.config[config_key]
-        path_str = config_entry.get('path', '').replace('\\', '/')
-        if not path_str:
-            return None
-        
-        # Handle absolute vs relative paths
-        if Path(path_str).is_absolute():
-            return Path(path_str)
-        else:
-            return self.base_path / path_str
-
+    # helper function that turns relative paths into absolute paths
+    def _resolve_path(self, path_str: str) -> Path:
+        p = Path(path_str)
+        if p.is_absolute():
+            return p
+        return self.base_path / p
 
 class SpikeDataLoader(DataStreamLoader):
     """
@@ -525,12 +379,6 @@ class EventDataLoader(DataStreamLoader):
         """
         High-level method to load events from a file path.
         
-        Handles:
-        1. Config lookup
-        2. Loading with synchronization
-        3. Onset filtering (optional)
-        4. Timestamp extraction
-        
         Args:
             file_path: Path to the event file
             sync_to_dlc: Whether to sync to DLC frames
@@ -544,32 +392,32 @@ class EventDataLoader(DataStreamLoader):
             logger.warning(f"Event file not found: {file_path}")
             return pd.DataFrame(), np.array([])
 
-        # 1. Find config entry and key
-        config_entry = find_config_entry(file_path, self.config)
-        if not config_entry:
-            # Fallback: try to load as generic CSV if no config found?
-            # For now, require config as per strict rules
-            logger.warning(f"No config entry found for {file_path}")
-            return pd.DataFrame(), np.array([])
-            
-        config_key = next((k for k, v in self.config.items() if v == config_entry), None)
-        if not config_key:
-            return pd.DataFrame(), np.array([])
-
-        # 2. Load with sync
+        # 1. Load with sync
         try:
-            df = self.load(config_key=config_key, sync_to_dlc=sync_to_dlc, dlc_loader=dlc_loader)
+            dlc_data = None
+            df = self.load(event_path=file_path, sync_to_dlc=False, dlc_data=None)
         except Exception as e:
             logger.error(f"Error loading {file_path}: {e}")
             return pd.DataFrame(), np.array([])
 
-        # 3. Filter onsets
+        # 2. Filter onsets
         if filter_onsets:
-            df = self._filter_onsets(df, config_entry)
+            df = self._filter_onsets(df)
 
-        # 4. Get times
+        # 3. Get times
         try:
-            times = self.get_event_times(df, config_key)
+            # Attempt to find strobe file in standard location
+            strobe_path = None
+            if self.base_path:
+                 potential_strobe = self.base_path / "kilosort4" / "sorter_output" / "strobe_seconds.npy"
+                 if potential_strobe.exists():
+                     strobe_path = potential_strobe
+                 elif (self.base_path / "strobe_seconds.npy").exists():
+                     strobe_path = self.base_path / "strobe_seconds.npy"
+            
+            times = self.get_event_times(df, strobe_path=strobe_path)
+            if times is None:
+                times = np.array([])
         except Exception as e:
             logger.warning(f"Could not extract times for {file_path}: {e}")
             times = np.array([])
@@ -580,6 +428,9 @@ class EventDataLoader(DataStreamLoader):
         """
         Infers port ID (1-4) for reward events based on Corner and Lick columns.
         Logic: Corner1-4 (presence) -> Lick1-4 (backup).
+
+        Returns:
+            pd.Series: Series of port IDs (1-4) for each time
         """
         # Initialize with 0 (unknown)
         port_ids = pd.Series(0, index=event_df.index)
@@ -603,57 +454,39 @@ class EventDataLoader(DataStreamLoader):
                 
         return port_ids
 
-    def detect_onsets(self, event_df: pd.DataFrame, config_entry: Dict[str, Any], target_column: Optional[str] = None) -> pd.DataFrame:
+    @staticmethod
+    def detect_onsets(event_df: pd.DataFrame, target_column: Optional[str] = None) -> pd.DataFrame:
         """
         Filters dataframe to return only rows corresponding to state changes (onsets).
-        Handles boolean (False->True) and ID changes.
+        Handles boolean (False->True) specific columns.
         """
         if event_df.empty:
             return event_df
 
         # 1. Target Column Logic (Priority)
         if target_column:
-            matched_col = None
             if target_column in event_df.columns:
-                matched_col = target_column
+                 # Detect rising edge (0->1 or False->True)
+                 vals = pd.to_numeric(event_df[target_column], errors='coerce').fillna(0)
+                 onsets = (vals.diff() == 1) & (vals == 1)
+                 return event_df[onsets]
             else:
-                matches = [c for c in event_df.columns if target_column in str(c)]
-                if matches:
-                    matched_col = matches[0]
-            
-            if matched_col:
-                # Detect rising edge (0->1 or False->True)
-                # Handle varying types
-                vals = pd.to_numeric(event_df[matched_col], errors='coerce').fillna(0)
-                onsets = (vals.diff() == 1) & (vals == 1)
-                
-                # Special case: First row might be 1 but diff is NaN. 
-                # If we assume start of file is not an onset unless 0->1, then diff capture is correct (NaN != 1).
-                # But if we treat first row 1 as onset? Typically no.
-                
-                return event_df[onsets]
-            else:
-                logger.warning(f"Target column '{target_column}' not found.")
+                 logger.warning(f"Target column '{target_column}' not found.")
+
+        # 2. Strict Column Detection
+        df_filled = event_df.fillna(0)
+        strict_columns = [
+            'Corner1', 'Corner2', 'Corner3', 'Corner4',
+            'Lick1', 'Lick2', 'Lick3', 'Lick4',
+            'Water', 'CW', 'CCW'
+        ]
         
-        # 2. ID Change Logic (General)
-        id_col = get_column_name(config_entry, ['CornerID', 'ID', 'id', 'Corner', 'Port', 'port', 'reward_type', 'Type'])
-        
-        if id_col and id_col in event_df.columns:
-            ids = event_df[id_col]
-            prev_ids = ids.shift(1)
-            
-            if pd.api.types.is_numeric_dtype(ids):
-                valid_curr = ids.notna() & (ids != 0)
-                changed = ids != prev_ids
-                valid_prev = prev_ids.notna() 
-                onsets = valid_curr & changed & valid_prev
-                return event_df[onsets]
-            else:
-                valid_curr = ids.notna() & (ids != '')
-                changed = ids != prev_ids
-                valid_prev = prev_ids.notna()
-                onsets = valid_curr & changed & valid_prev
-                return event_df[onsets]
+        found_cols = [c for c in strict_columns if c in event_df.columns]
+
+        if found_cols:
+            vals = df_filled[found_cols].astype(int)
+            onsets = (vals.diff().fillna(0) == 1).any(axis=1)
+            return event_df[onsets]
 
         # 3. Fallback: Return as is
         return event_df
@@ -673,7 +506,7 @@ class EventDataLoader(DataStreamLoader):
         """
         if event_type_name == 'movement_onset':
              if dlc_loader is None:
-                 dlc_loader = DLCDataLoader(self.base_path, self.config)
+                 dlc_loader = DLCDataLoader(self.base_path)
              return dlc_loader.get_movement_onsets()
 
         event_times = None
@@ -691,7 +524,7 @@ class EventDataLoader(DataStreamLoader):
 
         if event_times is None:
             # Fallback to CSV loading
-            # Determine file and config
+            # Determine file
             event_file = None
             if event_type_name == 'corner':
                 event_file = paths.event_corner
@@ -707,90 +540,88 @@ class EventDataLoader(DataStreamLoader):
                 logger.error(f"File for {event_type_name} not found: {event_file}")
                 return np.array([])
                 
-            config_entry = find_config_entry(event_file, self.config)
-            config_key = next((k for k, v in self.config.items() if v == config_entry), None)
-            
-            if not config_key:
+            # Load Raw (no config key needed)
+            try:
+                event_df = self.load(event_path=event_file, sync_to_dlc=False)
+            except Exception as e:
+                logger.error(f"Failed to load event file {event_file}: {e}")
                 return np.array([])
-                
-            # Load Raw
-            event_df = self.load(config_key=config_key, sync_to_dlc=(dlc_loader is not None), dlc_loader=dlc_loader)
             
             # Specific filtering logic moved from analyses.py
             
-            # 1. Port Inference & Reward Splitting PRE-ONSET logic
-            # Some filtering works better on the full trace, some on onsets.
-            # "Infer ports BEFORE filtering columns (needed for reward splitting)" - analyses.py
-            
-            port_series = None
+            # 1. Port Inference
             if 'reward' in event_type_name:
-                port_col = get_column_name(config_entry, ['port_id', 'PortID', 'Port', 'id'])
-                if port_col and port_col in event_df.columns:
-                    port_series = event_df[port_col]
-                else:
-                    port_series = self.infer_port_id(event_df)
+                # Infer port from Corner1-4 or Lick1-4 (if available)
+                # Usually Corner file is used for Reward.
+                # Reward itself comes from 'Water' column, but we need Port ID for splitting first/second
+                port_series = self.infer_port_id(event_df)
                     
             # 2. Column Filtering (Water)
             target_column = None
             if 'reward' in event_type_name:
-                 target_column = 'Water' # Look for Water column
-                 water_cols = [c for c in event_df.columns if 'Water' in str(c)]
-                 if water_cols:
-                     # Keep Water cols + Time/Index
-                     cols_to_keep = water_cols.copy()
-                     time_col = get_column_name(config_entry, ['Timestamp', 'timestamp', 'Time', 'time', 'Index', 'index'])
-                     if time_col and time_col in event_df.columns and time_col not in cols_to_keep:
-                         cols_to_keep.append(time_col)
+                target_column = 'Water' # Look for Water column
+                water_cols = [c for c in event_df.columns if 'Water' in str(c)]
+                if water_cols:
+                    # Keep Water cols + Time/Index
+                    cols_to_keep = water_cols.copy()
+                    time_col = None
+                    for c in ['Timestamp', 'timestamp', 'Time', 'time', 'Index', 'index']:
+                        if c in event_df.columns:
+                            time_col = c
+                            break
                      
-                     # IMPORTANT: If we generated port_series, we need to align it or keep it
-                     # If we index event_df, port_series indices must match.
-                     event_df = event_df[cols_to_keep]
-                 else:
-                     target_column = None # Fallback to general onset
+                    if time_col and time_col not in cols_to_keep:
+                        cols_to_keep.append(time_col)
+                    event_df = event_df[cols_to_keep]
+                else:
+                    target_column = None # Fallback to general onset
     
             # 3. Detect Onsets
-            event_df = self.detect_onsets(event_df, config_entry, target_column=target_column)
+            event_df = self.detect_onsets(event_df, target_column=target_column)
             
             # 4. Post-Onset Filtering (Splitting First/Second)
             if 'reward' in event_type_name:
-                 # Re-align port series to onset dataframe
-                 # port_series has same index as original event_df
-                 current_ports = port_series.reindex(event_df.index).fillna(0).values
+                current_ports = port_series.reindex(event_df.index).fillna(0).values
                  
-                 if event_type_name in ['reward_first', 'reward_second']:
-                     is_first = np.zeros(len(current_ports), dtype=bool)
-                     is_second = np.zeros(len(current_ports), dtype=bool)
+                if event_type_name in ['reward_first', 'reward_second']:
+                    is_first = np.zeros(len(current_ports), dtype=bool)
+                    is_second = np.zeros(len(current_ports), dtype=bool)
                      
-                     if len(current_ports) > 0:
-                         # First reward is always first? Or depends on context.
-                         # Defaulting to first logic from analyses.py
-                         is_first[0] = True
-                         prev_port = current_ports[0]
+                    if len(current_ports) > 0:
+                        # First reward is always first? Or depends on context.
+                        # Defaulting to first logic from analyses.py
+                        is_first[0] = True
+                        prev_port = current_ports[0]
                          
-                         for i in range(1, len(current_ports)):
-                             curr_port = current_ports[i]
-                             if curr_port != 0 and prev_port != 0:
-                                 if curr_port == prev_port:
-                                     is_second[i] = True
-                                 else:
-                                     is_first[i] = True
-                             else:
-                                 is_first[i] = True
+                        for i in range(1, len(current_ports)):
+                            curr_port = current_ports[i]
+                            if curr_port != 0 and prev_port != 0:
+                                if curr_port == prev_port:
+                                    is_second[i] = True
+                                else:
+                                    is_first[i] = True
+                            else:
+                                is_first[i] = True
                              
-                             if curr_port != 0:
-                                 prev_port = curr_port
+                            if curr_port != 0:
+                                prev_port = curr_port
                                  
-                     if event_type_name == 'reward_first':
-                          event_df = event_df[is_first]
-                          logger.info(f"Filtered for First Reward (Switch): {len(event_df)} events")
-                     elif event_type_name == 'reward_second':
-                          event_df = event_df[is_second]
-                          logger.info(f"Filtered for Second Reward (Repeat): {len(event_df)} events")
+                    if event_type_name == 'reward_first':
+                        event_df = event_df[is_first]
+                        logger.info(f"Filtered for First Reward (Switch): {len(event_df)} events")
+                    elif event_type_name == 'reward_second':
+                        event_df = event_df[is_second]
+                        logger.info(f"Filtered for Second Reward (Repeat): {len(event_df)} events")
                       
             elif event_type_name == 'corner':
                  # Exclude ID 0
-                 id_col = get_column_name(config_entry, ['CornerID', 'ID', 'id', 'Corner'])
-                 if id_col and id_col in event_df.columns:
+                 id_col = None
+                 for c in ['CornerID', 'ID', 'id', 'Corner']:
+                     if c in event_df.columns:
+                         id_col = c
+                         break
+                 
+                 if id_col:
                      ids = event_df[id_col].fillna(0).astype(int)
                  else:
                      ids = self.infer_port_id(event_df) # fallback
@@ -798,7 +629,16 @@ class EventDataLoader(DataStreamLoader):
                  event_df = event_df[ids != 0]
     
             # 5. Extract Times
-            event_times = self.get_event_times(event_df, config_key)
+            # Attempt to find strobe file in standard location
+            strobe_path = None
+            if self.base_path:
+                 potential_strobe = self.base_path / "kilosort4" / "sorter_output" / "strobe_seconds.npy"
+                 if potential_strobe.exists():
+                     strobe_path = potential_strobe
+                 elif (self.base_path / "strobe_seconds.npy").exists():
+                     strobe_path = self.base_path / "strobe_seconds.npy"
+            
+            event_times = self.get_event_times(event_df, strobe_path=strobe_path)
             
         # Ensure times are sorted for correct filtering/PETH
         if event_times is not None and len(event_times) > 0:
@@ -828,57 +668,9 @@ class EventDataLoader(DataStreamLoader):
 
         return event_times
 
-    def _filter_onsets(self, event_df: pd.DataFrame, config_entry: Dict[str, Any]) -> pd.DataFrame:
-        """
-        Filters logic transferred from analyses.py to keep loader self-contained.
-        Detects rising edges (Boolean) or ID changes.
-        """
-        if event_df.empty:
-            return event_df
-
-        # Fill NaNs with 0/False to handle reindexed data
-        df_filled = event_df.fillna(0)
-
-        # 1. Boolean columns
-        bool_cols = []
-        if config_entry and 'columns' in config_entry:
-            bool_cols = [c['name'] for c in config_entry['columns'] 
-                         if c.get('dtype') == 'bool' and c['name'] in event_df.columns]
-        
-        # Fallback detection
-        if not bool_cols:
-            keywords = ['Corner', 'Lick', 'Beam', 'Stim', 'Water', 'Reward']
-            for c in event_df.columns:
-                if any(k in str(c) for k in keywords):
-                    if pd.api.types.is_bool_dtype(event_df[c]) or \
-                       set(df_filled[c].unique()).issubset({0, 1, 0.0, 1.0, False, True}):
-                        bool_cols.append(c)
-
-        if bool_cols:
-            vals = df_filled[bool_cols].astype(int)
-            # diff() == 1 means 0 -> 1 transition
-            onsets = (vals.diff().fillna(0) == 1).any(axis=1)
-            return event_df[onsets]
-        
-        # 2. ID columns
-        id_col = get_column_name(config_entry, ['CornerID', 'ID', 'id', 'Corner', 'Port', 'port', 'reward_type', 'Type'])
-        if id_col and id_col in event_df.columns:
-            if pd.api.types.is_numeric_dtype(event_df[id_col]):
-                ids = df_filled[id_col]
-                onsets = (ids != ids.shift(1).fillna(0)) & (ids != 0)
-                return event_df[onsets]
-            else:
-                vals = event_df[id_col].fillna('')
-                onsets = (vals != vals.shift(1).fillna('')) & (vals != '')
-                return event_df[onsets]
-
-        return event_df
-
-
 class PhotometryDataLoader(DataStreamLoader):
     """Load photometry (TDT) data with proper absolute timestamp extraction."""
     
-
     def load(
         self, 
         dff_path: Path,
@@ -903,16 +695,27 @@ class PhotometryDataLoader(DataStreamLoader):
             raise FileNotFoundError(f"RAW file not found: {raw_path}")
         
         # Load dFF values
-        # Find config for variable name
-        dff_config = find_config_entry(dff_path) or {}
+        # Load dFF values
         dff_struct = sio.loadmat(dff_path)
         
-        # Get dFF variable name from config
-        if 'variables' in dff_config and 'dFF' in dff_config['variables']:
-            dff_var_name = dff_config['variables']['dFF']['name']
-        else:
-            dff_var_name = 'dFF'
+        # Get dFF variable name
+        # Try standard names: 'dFF', 'Data', 'data', or variable matching *dFF*
+        dff_var_name = 'dFF'
+        if dff_var_name not in dff_struct:
+            # Search keys
+            possible = [k for k in dff_struct.keys() if 'dff' in k.lower()]
+            if possible:
+                dff_var_name = possible[0]
+            else:
+                 # Last resort: take first non-standard key
+                 standard_keys = ['__header__', '__version__', '__globals__']
+                 keys = [k for k in dff_struct.keys() if k not in standard_keys]
+                 if keys:
+                     dff_var_name = keys[0]
         
+        if dff_var_name not in dff_struct:
+             raise ValueError(f"Could not find dFF variable in {dff_path}")
+
         dff_obj = dff_struct[dff_var_name]
         
         # Handle TDT Nested Struct (dFF -> pair -> data)
@@ -1499,8 +1302,6 @@ def load_session_data(
         neural_base_path=neural_base_path
     )
     
-    config = load_dataset_config()
-    
     # 3. Locate Neural Data
     # Heuristic: search in neural_base_path for {mouse_id}_{mmddyyyy}*
     session_glob = f"*{mouse_id}_{date_formats['mmddyyyy']}*"
@@ -1541,59 +1342,57 @@ def load_session_data(
             if strobe_npy.exists():
                 paths.strobe_seconds = strobe_npy
 
-    # Locate Files via Config (Robust) using the detected dates
-    def find_file_in_config(keyword_signatures):
-        for key, entry in config.items():
-            path_str = entry.get('path', '').replace('\\', '/')
-            # Check signatures
-            if mouse_id in path_str:
-                # Check date variants
-                date_match = (
-                    date_formats['yyyymmdd'] in path_str or 
-                    date_formats['mmddyyyy'] in path_str or
-                    date_formats['yymmdd'] in path_str
-                )
-                if date_match and all(k in path_str for k in keyword_signatures):
-                    full_path = base_path / path_str
-                    if full_path.exists():
-                        return full_path
-        return None
+    # 4. Locate Behavioral/Other Files using Globbing
 
     # Event Corner
-    paths.event_corner = find_file_in_config(['corner', '.csv'])
-    # Fallback to glob if not in config
-    if not paths.event_corner:
-        try:
-             event_dir = base_path / "Event"
-             if event_dir.exists():
-                 paths.event_corner = next(event_dir.glob(f"*{mouse_id}*corner*{date_formats['yyyymmdd']}*.csv"), None)
-        except: pass
-        
+    try:
+         event_dir = base_path / "Event"
+         if event_dir.exists():
+             # Try YYYYMMDD first as it's standard
+             f = next(event_dir.glob(f"*{mouse_id}*corner*{date_formats['yyyymmdd']}*.csv"), None)
+             if not f:
+                 f = next(event_dir.glob(f"*{mouse_id}*corner*{date_formats['mmddyyyy']}*.csv"), None)
+             paths.event_corner = f
+    except: pass
+    
     # Event Licking
-    paths.event_licking = find_file_in_config(['licking', '.csv'])
-    if not paths.event_licking and paths.event_corner:
-         # Often in same dir
-         parent = paths.event_corner.parent
-         paths.event_licking = next(parent.glob(f"*{mouse_id}*licking*{date_formats['yyyymmdd']}*.csv"), None)
+    try:
+         event_dir = base_path / "Event"
+         if event_dir.exists():
+             f = next(event_dir.glob(f"*{mouse_id}*licking*{date_formats['yyyymmdd']}*.csv"), None)
+             if not f:
+                 f = next(event_dir.glob(f"*{mouse_id}*licking*{date_formats['mmddyyyy']}*.csv"), None)
+             paths.event_licking = f
+             
+         if not paths.event_licking and paths.event_corner:
+             # Check same dir as corner
+             parent = paths.event_corner.parent
+             f = next(parent.glob(f"*{mouse_id}*licking*{date_formats['yyyymmdd']}*.csv"), None)
+             paths.event_licking = f
+    except: pass
 
     # For now, reward and switch are same as corner
     paths.event_reward = paths.event_corner
     paths.event_condition_switch = paths.event_corner
     
     # DLC
-    paths.dlc_h5 = find_file_in_config(['DLC', '.h5'])
-    if not paths.dlc_h5:
-        try:
-            dlc_dir = base_path / "DLC"
-            if dlc_dir.exists():
-                paths.dlc_h5 = next(dlc_dir.glob(f"*{mouse_id}*{date_formats['yyyymmdd']}*DLC*.h5"), None)
-        except: pass
+    try:
+        dlc_dir = base_path / "DLC"
+        if dlc_dir.exists():
+            f = next(dlc_dir.glob(f"*{mouse_id}*{date_formats['yyyymmdd']}*DLC*.h5"), None)
+            if not f:
+                f = next(dlc_dir.glob(f"*{mouse_id}*{date_formats['mmddyyyy']}*DLC*.h5"), None)
+            paths.dlc_h5 = f
+    except: pass
 
     # Video
     try:
         video_dir = base_path / "Video"
         if video_dir.exists():
-             paths.video_avi = next(video_dir.glob(f"*{mouse_id}*{date_formats['yyyymmdd']}*.avi"), None)
+             f = next(video_dir.glob(f"*{mouse_id}*{date_formats['yyyymmdd']}*.avi"), None)
+             if not f:
+                 f = next(video_dir.glob(f"*{mouse_id}*{date_formats['mmddyyyy']}*.avi"), None)
+             paths.video_avi = f
     except: pass
     
     # TDT
@@ -1601,6 +1400,12 @@ def load_session_data(
         tdt_base = base_path / "TDT"
         # TDT folders usually YYMMDD
         session_tdt_dir = tdt_base / date_formats['yymmdd']
+        if not session_tdt_dir.exists():
+            # Try searching
+             found = list(tdt_base.glob(f"*{date_formats['yymmdd']}*"))
+             if found:
+                 session_tdt_dir = found[0]
+        
         if session_tdt_dir.exists():
              paths.tdt_dff = next(session_tdt_dir.glob(f"*{mouse_id}*dFF*.mat"), None)
              paths.tdt_raw = next(session_tdt_dir.glob(f"*UnivRAW_offdemod.mat"), None)

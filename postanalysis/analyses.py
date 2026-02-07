@@ -4,9 +4,6 @@ from pathlib import Path
 from postanalysis.data_loader import (
     DataPaths,
     convert_date_formats,
-    load_dataset_config,
-    find_config_entry,
-    get_column_name,
     SpikeDataLoader,
     DLCDataLoader,
     EventDataLoader,
@@ -34,146 +31,7 @@ DEFAULT_DOPAMINE_SAMPLING_RATE = 100.0  # Hz
 DEFAULT_PHASE_LOCKING_SIGNIFICANCE = 0.01  # p-value threshold
 DEFAULT_MIN_SPIKES_FOR_PHASE = 10  # Minimum spikes for time-resolved analysis
 
-@lru_cache(maxsize=1)
-def _get_dataset_config():
-    """Loads the dataset_config.json file."""
-    config_path = Path(__file__).resolve().parent.parent / 'dataset_config.json'
-    try:
-        with open(config_path, 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        print(f"  Error: dataset_config.json not found at {config_path}")
-        return {}
 
-def _get_event_onsets_df(event_df, config_entry, target_column=None):
-    """
-    Filters a DataFrame to return only rows corresponding to event onsets.
-    Handles frame-by-frame boolean data (False->True) and ID change data.
-    
-    Args:
-        event_df: DataFrame containing event data
-        config_entry: Configuration dictionary for the event file
-        target_column: Optional specific column name to filter for (e.g., 'Water')
-    
-    CRITICAL CHANGE: This function explicitly handles truncated data where
-    the initial rows are NaNs. It does NOT convert NaNs to 0s for difference 
-    calculation to prevent spurious 0 -> 1 transitions at the start of valid data.
-    """
-    if event_df.empty:
-        return event_df
-
-    # 1. Target Column Logic (Priority)
-    if target_column:
-        # Check if target column exists (exact match or partial match logic could vary, 
-        # but let's try exact first, then fallback to substring)
-        matched_col = None
-        if target_column in event_df.columns:
-            matched_col = target_column
-        else:
-            # Try finding column that contains target_string
-            matches = [c for c in event_df.columns if target_column in str(c)]
-            if matches:
-                matched_col = matches[0]
-        
-        if matched_col:
-            # Detect rising edge (0->1 or False->True)
-            vals = event_df[matched_col].apply(pd.to_numeric, errors='coerce')
-            onsets = vals.diff() == 1
-            return event_df[onsets]
-        else:
-            print(f"  Warning: Target column '{target_column}' not found in event file.")
-            # Fallback to standard logic if target not found? Or return empty?
-            # Safer to return empty if specific target was requested but not found.
-            return event_df[pd.Series(False, index=event_df.index)]
-
-    
-    # 2. Boolean columns
-    bool_cols = []
-    if config_entry and 'columns' in config_entry:
-        bool_cols = [c['name'] for c in config_entry['columns'] 
-                     if c.get('dtype') == 'bool' and c['name'] in event_df.columns]
-    
-    # Fallback: Check for typical boolean names
-    if not bool_cols:
-        keywords = ['Corner', 'Lick', 'Beam', 'Stim', 'Water', 'Reward']
-        for c in event_df.columns:
-            if any(k in str(c) for k in keywords):
-                # Check if values are effectively boolean
-                unique_vals = event_df[c].dropna().unique()
-                if pd.api.types.is_bool_dtype(event_df[c]) or \
-                   set(unique_vals).issubset({0, 1, 0.0, 1.0, False, True}):
-                    bool_cols.append(c)
-
-    if bool_cols:
-        # Detect rising edge on EACH boolean column
-        # Logic: Convert to float (NaN preserved). diff() -> (NaN, 1.0, 0.0, -1.0)
-        vals = event_df[bool_cols].apply(pd.to_numeric, errors='coerce')
-        
-        # Heuristic: Distinguish "Event" (Pulse, e.g. Lick) from "State" (Condition, e.g. CW)
-        # Event: Only Rising Edge (0 -> 1) matters.
-        # State: ANY Change (0 -> 1 OR 1 -> 0) matters.
-        
-        state_keywords = ['CW', 'CCW', 'Rule', 'Condition', 'Strategy', 'Phase']
-        
-        mask_list = []
-        for col in bool_cols:
-            if any(k in col for k in state_keywords):
-                # State variable: Detect ANY change (-1 or 1)
-                # Ignore NaN -> Value (handled by dropna/diff logic naturally? 
-                # diff() of NaN->0 is NaN. diff() of 0->1 is 1. diff of 1->0 is -1.
-                # We want abs(diff) == 1.
-                change = vals[col].diff().abs() == 1
-                mask_list.append(change)
-            else:
-                # Event variable: Detect Rising Edge (0 -> 1)
-                rise = vals[col].diff() == 1
-                mask_list.append(rise)
-        
-        if mask_list:
-            onsets = pd.concat(mask_list, axis=1).any(axis=1)
-            return event_df[onsets]
-        else:
-            # Fallback if loop was empty (shouldn't happen if bool_cols is not empty)
-            return event_df[pd.Series(False, index=event_df.index)]
-    
-    # 2. ID columns
-    id_col = get_column_name(config_entry, ['CornerID', 'ID', 'id', 'Corner', 'Port', 'port', 'reward_type', 'Type'])
-    if id_col and id_col in event_df.columns:
-        # If it's numeric/ID-like
-        ids = event_df[id_col]
-        
-        # Logic: Change in ID, current is not 0 (or null), AND previous was not Null/NaN
-        # We want to catch real transitions, not artifactual startup transitions
-        prev_ids = ids.shift(1)
-        
-        if pd.api.types.is_numeric_dtype(ids):
-            # Reset NaNs to 0 just for value comparison, but track validity
-            # Actually, standard logic: (curr != prev) & (curr != 0)
-            # But if prev is NaN, (curr != prev) is True. We want to avoid that.
-            
-            # Mask for valid current ID
-            valid_curr = ids.notna() & (ids != 0)
-            
-            # Mask for changed ID
-            changed = ids != prev_ids
-            
-            # Mask for valid previous ID (if previous is NaN, we shouldn't count it as a switch onset)
-            # This is the key fix for "start of file" spurious events
-            valid_prev = prev_ids.notna() 
-            
-            onsets = valid_curr & changed & valid_prev
-            return event_df[onsets]
-        else:
-            # String IDs
-            valid_curr = ids.notna() & (ids != '')
-            changed = ids != prev_ids
-            valid_prev = prev_ids.notna()
-            
-            onsets = valid_curr & changed & valid_prev
-            return event_df[onsets]
-
-    # 3. Fallback: Return as is (sparse)
-    return event_df
 
 def _load_lfp_sampling_rate(lfp_dir: Path) -> float:
     """
@@ -289,11 +147,10 @@ def _get_kinematic_states(paths: DataPaths, speed_threshold: float = 5.0, px_per
     """
     # 1. Load Data
     try:
-        config = load_dataset_config()
         base_path = paths.base_path
         
         # DLC for tracking and velocity
-        dlc_loader = DLCDataLoader(base_path, config)
+        dlc_loader = DLCDataLoader(base_path)
         # Check if dlc_h5 exists in paths
         if not paths.dlc_h5 or not paths.dlc_h5.exists():
             print("  Warning: DLC file not found.")
@@ -303,8 +160,8 @@ def _get_kinematic_states(paths: DataPaths, speed_threshold: float = 5.0, px_per
         
         # Calculate average speed of Snout and Tail
         strobe_path = paths.strobe_seconds
-        v_snout, _ = dlc_loader.calculate_velocity(df_dlc, bodypart='Snout', px_per_cm=px_per_cm, strobe_path=strobe_path)
-        v_tail, _ = dlc_loader.calculate_velocity(df_dlc, bodypart='Tail', px_per_cm=px_per_cm, strobe_path=strobe_path)
+        v_snout, _ = dlc_loader.calculate_velocity(df_dlc, video_fs=60, px_per_cm=px_per_cm, strobe_path=strobe_path)
+        v_tail, _ = dlc_loader.calculate_velocity(df_dlc, video_fs=60, px_per_cm=px_per_cm, strobe_path=strobe_path)
         
         # Ensure length matches df_dlc
         if len(v_snout) < len(df_dlc):
@@ -314,19 +171,18 @@ def _get_kinematic_states(paths: DataPaths, speed_threshold: float = 5.0, px_per
         v_avg = (v_snout + v_tail) / 2.0
         
         # 2. Get Port IDs at every frame (ROI presence)
-        event_loader = EventDataLoader(base_path, config)
-        corner_cfg = find_config_entry(paths.event_corner, config)
-        if not corner_cfg:
+        event_loader = EventDataLoader(base_path)
+        
+        if not paths.event_corner or not paths.event_corner.exists():
             return []
         
-        corner_key = next(k for k, v in config.items() if v == corner_cfg)
         corner_df = event_loader.load(paths.event_corner, sync_to_dlc=True, dlc_data=df_dlc)
         port_ids = event_loader.infer_port_id(corner_df).values
         
         # 3. Timebase (Strobes or Fixed FS)
         try:
-            strobe_loader = StrobeDataLoader(base_path, config)
-            strobe_times = strobe_loader.load()
+            strobe_loader = StrobeDataLoader(base_path)
+            strobe_times = strobe_loader.load(paths.strobe_seconds)
         except Exception:
             strobe_times = np.arange(len(df_dlc)) / 60.0
             
@@ -711,10 +567,9 @@ def _load_spike_data(paths: DataPaths, return_types: bool = True):
                (spike_times_sec, spike_clusters, unique_clusters, unit_types) if return_types=True
     """
     try:
-        config = load_dataset_config()
         base_path = paths.neural_base.parent if paths.neural_base else Path('.')
         base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
-        spike_loader = SpikeDataLoader(base_path, config)
+        spike_loader = SpikeDataLoader(base_path)
         spike_data = spike_loader.load(paths.kilosort_dir)
         
         if return_types:
@@ -749,33 +604,16 @@ def _load_dlc_and_calculate_velocity(paths: DataPaths, video_fs: int, px_per_cm:
         return None, None
     
     try:
-        config = load_dataset_config()
         base_path = paths.dlc_h5.parent if paths.dlc_h5.parent.exists() else Path('.')
         base_path = paths.base_path
-        dlc_loader = DLCDataLoader(base_path, config)
-        
-        # Find config key for DLC file
-        dlc_config_entry = find_config_entry(paths.dlc_h5, config)
-        if not dlc_config_entry:
-            raise ValueError(f"Could not find configuration for {paths.dlc_h5}")
-        
-        # Find the config key
-        dlc_config_key = None
-        for key, value in config.items():
-            if value == dlc_config_entry:
-                dlc_config_key = key
-                break
-        
-        if not dlc_config_key:
-            raise ValueError(f"Could not determine config key for {paths.dlc_h5}")
+        dlc_loader = DLCDataLoader(base_path)
         
         # Load DLC data
-        df_dlc = dlc_loader.load(config_key=dlc_config_key)
+        df_dlc = dlc_loader.load(paths.dlc_h5)
         
         # Calculate velocity using the loader's method
         velocity, velocity_times = dlc_loader.calculate_velocity(
             df_dlc,
-            bodypart=None,  # Will use config to determine
             video_fs=video_fs,
             px_per_cm=px_per_cm
         )
