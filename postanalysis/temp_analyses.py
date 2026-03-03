@@ -1014,7 +1014,7 @@ def calculate_event_tuning(paths: DataPaths, event_file_type: str, time_window_m
         base_path = paths.neural_base.parent if paths.neural_base else Path('.')
         base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
         spike_loader = SpikeDataLoader(base_path)
-        spike_data = spike_loader.load(paths.kilosort_dir)
+        spike_data = spike_loader.load()
         
         spike_times_sec = spike_data['spike_times_sec']
         spike_clusters = spike_data['spike_clusters']
@@ -1124,7 +1124,16 @@ def calculate_movement_tuning(paths: DataPaths, video_fs: int = 60, px_per_cm: f
         base_path = paths.base_path
         dlc_loader = DLCDataLoader(base_path)
         
-        df_dlc = dlc_loader.load(paths.dlc_h5)
+        # Find config key for DLC file
+        dlc_config_entry = find_config_entry(paths.dlc_h5)
+        if not dlc_config_entry:
+            raise ValueError(f"Could not find config for {paths.dlc_h5}")
+        
+        dlc_config_key = next((k for k, v in config.items() if v == dlc_config_entry), None)
+        if not dlc_config_key:
+            raise ValueError(f"Could not find config key for {paths.dlc_h5}")
+
+        df_dlc = dlc_loader.load(config_key=dlc_config_key)
         velocity, velocity_times = dlc_loader.calculate_velocity(
             df_dlc, video_fs=video_fs, px_per_cm=px_per_cm
         )
@@ -14009,17 +14018,21 @@ def analyze_ili_by_port(paths: DataPaths, bout_threshold_sec: float = 0.5):
         strobe_times = strobe_loader.load()
         
         # Load Licking Data
-        lick_df = event_loader.load(paths.event_licking)
+        lick_config_entry = find_config_entry(paths.event_licking)
+        lick_config_key = next(k for k, v in config.items() if v == lick_config_entry)
+        lick_df = event_loader.load(config_key=lick_config_key)
         
         # Load Corner Data (to define visits)
         if not paths.event_corner or not paths.event_corner.exists():
              print("  Error: Corner file required to define visits for ILI analysis.")
              return
              
-        corner_df = event_loader.load(paths.event_corner)
+        corner_config_entry = find_config_entry(paths.event_corner)
+        corner_key = next(k for k, v in config.items() if v == corner_config_entry)
+        corner_df = event_loader.load(config_key=corner_key)
         
         # Infer Ports using our robust logic
-        id_col = next((c for c in ['CornerID', 'ID', 'id', 'Corner'] if c in corner_df.columns), None)
+        id_col = get_column_name(corner_config_entry, ['CornerID', 'ID', 'id', 'Corner'])
         if id_col and id_col in corner_df.columns:
             corner_ids = corner_df[id_col].fillna(0).astype(int).values
         else:

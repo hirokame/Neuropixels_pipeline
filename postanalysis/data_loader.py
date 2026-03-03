@@ -52,7 +52,6 @@ class DataStreamLoader:
     def __init__(self, base_path: Path):
         self.base_path = Path(base_path)
     
-    # helper function that turns relative paths into absolute paths
     def _resolve_path(self, path_str: str) -> Path:
         p = Path(path_str)
         if p.is_absolute():
@@ -82,7 +81,6 @@ class SpikeDataLoader(DataStreamLoader):
              raise FileNotFoundError(f"spike_seconds_adj.npy not found in {kilosort_dir}")
              
         spike_times = np.load(spike_times_path, mmap_mode='r')
-        # We assume it is already in seconds given the name
         spike_times_sec = spike_times.flatten()
         logger.info(f"Loaded spike times from {spike_times_path.name}")
 
@@ -110,12 +108,50 @@ class SpikeDataLoader(DataStreamLoader):
                     logger.info(f"Loaded {len(unit_types)} unit classifications")
             except Exception as e:
                 logger.warning(f"Failed to load unit classification: {e}")
+
+        # 4. Load Unit labels
+        unit_labels = {}
+        labels_path = kilosort_dir.parent / "kilosort4qMetrics" / "templates._bc_unit_labels.tsv"
+        if labels_path.exists():
+            try:
+                df_labels = pd.read_csv(labels_path, sep='\t')
+                if 'unit_id' in df_labels.columns and 'label' in df_labels.columns:
+                    unit_labels = dict(zip(df_labels['unit_id'], df_labels['label']))
+                    logger.info(f"Loaded {len(unit_labels)} unit labels")
+            except Exception as e:
+                logger.warning(f"Failed to load unit labels: {e}")
         
+        # --- Filter by unit_label == 1 or 2 ---
+        if unit_labels:
+            # We must filter out any clusters not belonging to label 1 or 2
+            valid_clusters = {cid for cid, label in unit_labels.items() if label in (1, 2)}
+            
+            # Mask the unique clusters
+            unique_mask = np.isin(unique_clusters, list(valid_clusters))
+            filtered_unique_clusters = unique_clusters[unique_mask]
+            
+            # Mask the spikes
+            spike_mask = np.isin(spike_clusters, filtered_unique_clusters)
+            filtered_spike_clusters = spike_clusters[spike_mask]
+            filtered_spike_times = spike_times_sec[spike_mask]
+            
+            logger.info(
+                f"Filtered to {len(filtered_unique_clusters)} valid units (labels 1 or 2) "
+                f"from {len(unique_clusters)} original units, and {len(filtered_spike_times)} spikes."
+            )
+            
+            spike_clusters = filtered_spike_clusters
+            spike_times_sec = filtered_spike_times
+            unique_clusters = filtered_unique_clusters
+        else:
+            logger.warning("No unit labels available. Cannot filter by label 1 or 2. Using all units.")
+
         return {
             'spike_times_sec': spike_times_sec,
             'spike_clusters': spike_clusters,
             'unique_clusters': unique_clusters,
-            'unit_types': unit_types
+            'unit_types': unit_types,
+            'unit_labels': unit_labels
         }
 
 
@@ -137,16 +173,12 @@ class DLCDataLoader(DataStreamLoader):
             
         try:
             df_dlc = pd.read_hdf(dlc_path)
-            # Handle potential different storage keys? Usually pandas finds default.
         except Exception as e:
             raise IOError(f"Failed to load DLC file {dlc_path}: {e}")
         
-        # Verify MultiIndex columns
         if not isinstance(df_dlc.columns, pd.MultiIndex):
-             # Try to fix if it's flat? (Unlikely for standard DLC)
              raise ValueError(f"DLC file {dlc_path.name} does not have MultiIndex columns")
              
-        # Basic validation (optional, can skip strict schema check if we trust path)
         logger.info(f"Loaded DLC data with {len(df_dlc)} frames from {dlc_path.name}")
         return df_dlc
     
@@ -171,13 +203,11 @@ class DLCDataLoader(DataStreamLoader):
         """
         from scipy.ndimage import gaussian_filter1d
         
-        # Get scorer
         if isinstance(df_dlc.columns, pd.MultiIndex):
             scorer = df_dlc.columns.get_level_values(0).unique()[0]
         else:
             raise ValueError("DLC DataFrame must have MultiIndex columns")
         
-        # Extract x, y coordinates for Snout and Tail
         def _get_interp(bodypart):
             _x = df_dlc[(scorer, bodypart, 'x')].copy()
             _y = df_dlc[(scorer, bodypart, 'y')].copy()
@@ -588,8 +618,6 @@ class EventDataLoader(DataStreamLoader):
                     is_second = np.zeros(len(current_ports), dtype=bool)
                      
                     if len(current_ports) > 0:
-                        # First reward is always first? Or depends on context.
-                        # Defaulting to first logic from analyses.py
                         is_first[0] = True
                         prev_port = current_ports[0]
                          
@@ -640,24 +668,20 @@ class EventDataLoader(DataStreamLoader):
             
             event_times = self.get_event_times(event_df, strobe_path=strobe_path)
             
+        if event_times is None:
+            event_times = np.array([])
+            
         # Ensure times are sorted for correct filtering/PETH
         if event_times is not None and len(event_times) > 0:
             event_times.sort()
 
         # 6. Post-Time Filtering (Lick Bouts)
         if event_type_name == 'licking_bout_start':
-            # Default threshold if not passed? 
-            # We can't easy change signature from here without checking callers, but default 0.5s is standard.
             bout_threshold = 0.5
             
             if len(event_times) > 1:
                 inter_lick_intervals = np.diff(event_times)
-                # Bout start = Events where time since LAST event is > threshold
-                # np.diff is (t[1]-t[0], t[2]-t[1]...) corresponding to index 0 of difference array.
-                # indices where diff > threshold means the event at index+1 is the start of a new bout.
                 bout_start_indices = np.where(inter_lick_intervals > bout_threshold)[0] + 1
-                
-                # The very first event is always a bout start
                 bout_start_indices = np.insert(bout_start_indices, 0, 0)
                 
                 event_times = event_times[bout_start_indices]
@@ -693,21 +717,13 @@ class PhotometryDataLoader(DataStreamLoader):
             raise FileNotFoundError(f"dFF file not found: {dff_path}")
         if not raw_path or not raw_path.exists():
             raise FileNotFoundError(f"RAW file not found: {raw_path}")
-        
-        # Load dFF values
-        # Load dFF values
         dff_struct = sio.loadmat(dff_path)
-        
-        # Get dFF variable name
-        # Try standard names: 'dFF', 'Data', 'data', or variable matching *dFF*
         dff_var_name = 'dFF'
         if dff_var_name not in dff_struct:
-            # Search keys
             possible = [k for k in dff_struct.keys() if 'dff' in k.lower()]
             if possible:
                 dff_var_name = possible[0]
             else:
-                 # Last resort: take first non-standard key
                  standard_keys = ['__header__', '__version__', '__globals__']
                  keys = [k for k in dff_struct.keys() if k not in standard_keys]
                  if keys:
@@ -717,18 +733,12 @@ class PhotometryDataLoader(DataStreamLoader):
              raise ValueError(f"Could not find dFF variable in {dff_path}")
 
         dff_obj = dff_struct[dff_var_name]
-        
-        # Handle TDT Nested Struct (dFF -> pair -> data)
-        # Check if the object has 'pair' field
         try:
-            # Unwrap (1,1) array
             if dff_obj.shape == (1, 1):
                 val = dff_obj[0, 0]
                 if hasattr(val, 'dtype') and val.dtype.names and 'pair' in val.dtype.names:
-                    # Found 'pair' field, drill down
                     pair_struct = val['pair']
                     if pair_struct.size > 0:
-                        # Take first element of pair (index 0) and 'data' field
                         dff_obj = pair_struct[0, 0]['data']
                         logger.info("  Extracted dFF data from nested 'pair' struct.")
         except Exception as e:
@@ -736,17 +746,11 @@ class PhotometryDataLoader(DataStreamLoader):
 
         dff_vals = dff_obj.squeeze()
         
-        # Extract absolute timestamps from raw H5 file
         with h5py.File(raw_path, 'r') as f_raw:
-            # Access timestamp reference array
             ts_refs = f_raw['/handles/Ts']
-            
-            # Dereference to get actual absolute seconds
-            # 'box' usually = 0 for single subject recordings
             box_index = 0
             ts_abs = np.array(f_raw[np.ravel(ts_refs)[box_index]]).squeeze()
             
-        # Ensure 1D arrays
         dff_vals = np.atleast_1d(dff_vals)
         ts_abs = np.atleast_1d(ts_abs)
         
@@ -854,15 +858,6 @@ class LFPDataLoader(DataStreamLoader):
             
         self.fs = self.extractor.get_sampling_frequency()
         self.channel_ids = self.extractor.get_channel_ids()
-        
-        # Attempt to get t_start (if sorting segment info exists)
-        # Usually for concatenated recordings, t_start might be > 0
-        # For now assume 0 or read from probegroup if available
-        # self.t_start = ... 
-        
-        # Synchronization (Drift Correction)
-        # CRITICAL: We calculate the linear transform (slope/intercept) DYNAMICALLY 
-        # for every session because the clock drift varies day-to-day.
         self._compute_sync_params()
 
     def _compute_sync_params(self):
@@ -924,11 +919,6 @@ class LFPDataLoader(DataStreamLoader):
         """
         if self.extractor is None:
             raise RuntimeError("LFP Extractor not initialized")
-
-        # Map start/end adjusted time -> LFP samples
-        # Adj = m * (LFP * 30) + c
-        # LFP = (Adj - c) / (m * 30)
-        
         if self.sync_params:
             m = self.sync_params['m']
             c = self.sync_params['c']
@@ -937,12 +927,9 @@ class LFPDataLoader(DataStreamLoader):
             s_sample = int((start_time - c) / (m * r))
             e_sample = int((end_time - c) / (m * r))
         else:
-            # Fallback: Nominal time
-            # Time = Sample / fs
             s_sample = int(start_time * self.fs)
             e_sample = int(end_time * self.fs)
             
-        # Bounds check
         n_samples = self.extractor.get_num_samples()
         s_sample = max(0, s_sample)
         e_sample = min(n_samples, e_sample)
@@ -950,12 +937,7 @@ class LFPDataLoader(DataStreamLoader):
         if s_sample >= e_sample:
             return np.array([]), np.array([])
             
-        # Load traces
-        # return_scaled=True returns uV (float) usually
-        
         if reference == 'car':
-            # Use SpikeInterface for CAR to ensure we use ALL channels for the average,
-            # even if we are only requesting a subset.
             rec = spre.common_reference(self.extractor, reference='global', operator='average')
             traces = rec.get_traces(
                 start_frame=s_sample, 
@@ -964,13 +946,6 @@ class LFPDataLoader(DataStreamLoader):
                 return_scaled=True
             )
         elif reference in ['bipolar', 'csd']:
-             # For Spatial Referencing (Bipolar/CSD), we MUST use the full probe topology.
-             # 1. Load ALL channels (to ensure we have neighbors)
-             # 2. Sort by Shank and Depth
-             # 3. Apply transform
-             # 4. Subset to requested 'channels' at the end
-             
-             # Load all traces for the time window
              all_traces = self.extractor.get_traces(
                 start_frame=s_sample, 
                 end_frame=e_sample, 
@@ -978,92 +953,54 @@ class LFPDataLoader(DataStreamLoader):
                 return_scaled=True
             )
              
-             # Get Geometry
              locs = self.extractor.get_channel_locations() # (N, 2)
              keys = self.extractor.get_property_keys()
              
              if 'group' in keys:
                  groups = self.extractor.get_property('group')
              else:
-                 # Assume single shank if no group property
                  groups = np.zeros(self.extractor.get_num_channels(), dtype=int)
                  
-             # Sort indices: Group (Shank) Primary, X (Column) Secondary, Y (Depth) Tertiary
-             # np.lexsort usage: lexsort((secondary, primary)) ... applied recursively?
-             # lexsort((tertiary, secondary, primary))
-             
-             # Keys: groups, locs[:, 0] (x), locs[:, 1] (y)
-             # We want Primary=Group, Secondary=X, Tertiary=Y
              sort_idx = np.lexsort((locs[:, 1], locs[:, 0], groups))
              
-             # Reorder traces and metadata according to spatial sort
              sorted_traces = all_traces[:, sort_idx]
              sorted_groups = groups[sort_idx]
              sorted_x = locs[sort_idx, 0]
              
-             # Apply Transform
              if reference == 'bipolar':
-                 # Standard Bipolar: Ch[i] - Ch[i+1] (next channel up/down)
-                 # We implement: Output[i] = Input[i] - Input[next_neighbor]
-                 # Valid only if next_neighbor is on same shank AND same X-column
-                 
-                 # Shifted array (next spatial neighbor)
                  next_traces = np.roll(sorted_traces, -1, axis=1)
                  next_groups = np.roll(sorted_groups, -1)
                  next_x = np.roll(sorted_x, -1)
                  
-                 # Mask where neighbor is valid (Same Group AND Same X)
                  valid_mask = (sorted_groups == next_groups) & (sorted_x == next_x)
-                 valid_mask[-1] = False # Last element wrap-around invalid
+                 valid_mask[-1] = False 
                  
                  ref_traces = sorted_traces.copy()
-                 # Subtract next neighbor where valid
                  ref_traces[:, valid_mask] -= next_traces[:, valid_mask]
                  
-                 # For invalid channels (end of columns), set to 0
                  ref_traces[:, ~valid_mask] = 0
 
              elif reference == 'csd':
-                 # CSD Kernel [-1, 2, -1] (-1*Laplacian)
-                 # Requires i-1, i, i+1 to be on same shank AND same column
-                 
-                 # Check continuity for triads
                  g = sorted_groups
                  x = sorted_x
                  
-                 # Valid CSD needs g[i-1]==g[i]==g[i+1] AND x[i-1]==x[i]==x[i+1]
-                 # Indices 1..N-2
                  valid_groups = (g[:-2] == g[1:-1]) & (g[1:-1] == g[2:])
                  valid_x = (x[:-2] == x[1:-1]) & (x[1:-1] == x[2:])
                  valid_triads = valid_groups & valid_x
                  
-                 # Create full mask (edges False)
                  valid_mask = np.zeros(len(g), dtype=bool)
                  valid_mask[1:-1] = valid_triads
                  
-                 # Apply convolution to full sorted array
-                 # Note: convolve1d will bleed across invalid boundaries, but we mask them out.
-                 # However, the values AT valid indices will be correct because they only depend on +/- 1 neighbor
-                 # which we verified are valid.
                  csd_full = convolve1d(sorted_traces, [-1, 2, -1], axis=1, mode='constant', cval=0.0)
                  
                  ref_traces = np.zeros_like(sorted_traces)
-                 # Only keep CSD where triad was valid
                  ref_traces[:, valid_mask] = csd_full[:, valid_mask]
                  
-             # Map back to Original Order to satisfy 'channels' request
-             # We computed ref_traces in 'sort_idx' order.
-             # We need to construct output array in original order.
-             
-             # output_all[sort_idx[i]] = ref_traces[i]
              output_all = np.zeros_like(ref_traces)
              output_all[:, sort_idx] = ref_traces
              
-             # Subset to requested channels
              if channels is not None:
                  all_ids = self.extractor.get_channel_ids()
-                 # Map requested IDs to integer indices
-                 # Optimization: Create a lookup map
                  id_to_idx = {id: i for i, id in enumerate(all_ids)}
                  req_indices = [id_to_idx[ch] for ch in channels if ch in id_to_idx]
                  traces = output_all[:, req_indices]
@@ -1078,7 +1015,6 @@ class LFPDataLoader(DataStreamLoader):
                 return_scaled=True
             )
 
-        # Generate timestamps
         lfp_indices = np.arange(s_sample, e_sample)
         if self.sync_params:
             m = self.sync_params['m']
@@ -1089,6 +1025,7 @@ class LFPDataLoader(DataStreamLoader):
             timestamps = lfp_indices / self.fs
             
         return traces, timestamps
+
 @dataclass
 class DataPaths:
     """Container for all data file paths for a session."""
@@ -1303,11 +1240,9 @@ def load_session_data(
     )
     
     # 3. Locate Neural Data
-    # Heuristic: search in neural_base_path for {mouse_id}_{mmddyyyy}*
     session_glob = f"*{mouse_id}_{date_formats['mmddyyyy']}*"
     imec_dir = None
     
-    # Try looking specifically for standard neuropixels folder structure
     potential_dirs = list(neural_base_path.glob(session_glob))
     for d in potential_dirs:
         if d.is_dir():
@@ -1317,7 +1252,6 @@ def load_session_data(
                  imec_dir = imec_subdirs[0]
                  break
     
-    # If not found, check if base_path ITSELF is the dir (or close to it)
     if not imec_dir:
         for d in neural_base_path.glob("*_imec0"):
             if mouse_id in d.name and date_formats['mmddyyyy'] in d.name:
@@ -1331,12 +1265,10 @@ def load_session_data(
         paths.rastermap_dir = imec_dir / "rastermap"
         paths.analyzer_beh = imec_dir / "analyzer_beh"
 
-        # Check for pre-processed licking
         lick_npy = paths.kilosort_dir / "licking_seconds.npy"
         if lick_npy.exists():
             paths.licking_seconds = lick_npy
         
-        # Check for strobe_seconds
         if paths.kilosort_dir:
             strobe_npy = paths.kilosort_dir / "strobe_seconds.npy"
             if strobe_npy.exists():
@@ -1348,7 +1280,6 @@ def load_session_data(
     try:
          event_dir = base_path / "Event"
          if event_dir.exists():
-             # Try YYYYMMDD first as it's standard
              f = next(event_dir.glob(f"*{mouse_id}*corner*{date_formats['yyyymmdd']}*.csv"), None)
              if not f:
                  f = next(event_dir.glob(f"*{mouse_id}*corner*{date_formats['mmddyyyy']}*.csv"), None)
@@ -1365,13 +1296,11 @@ def load_session_data(
              paths.event_licking = f
              
          if not paths.event_licking and paths.event_corner:
-             # Check same dir as corner
              parent = paths.event_corner.parent
              f = next(parent.glob(f"*{mouse_id}*licking*{date_formats['yyyymmdd']}*.csv"), None)
              paths.event_licking = f
     except: pass
 
-    # For now, reward and switch are same as corner
     paths.event_reward = paths.event_corner
     paths.event_condition_switch = paths.event_corner
     
@@ -1398,10 +1327,8 @@ def load_session_data(
     # TDT
     try:
         tdt_base = base_path / "TDT"
-        # TDT folders usually YYMMDD
         session_tdt_dir = tdt_base / date_formats['yymmdd']
         if not session_tdt_dir.exists():
-            # Try searching
              found = list(tdt_base.glob(f"*{date_formats['yymmdd']}*"))
              if found:
                  session_tdt_dir = found[0]
