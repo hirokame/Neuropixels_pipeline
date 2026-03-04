@@ -427,7 +427,6 @@ def _plot_population_heatmap(df, output_path, title, xlabel, ylabel="Neuron ID",
         plt.tight_layout() # This might clip manual text outside axes
         plt.savefig(output_path, bbox_inches='tight') # bbox_inches='tight' saves the outside text
         plt.close(fig)
-        print(f"  Population heatmap saved to {output_path}")
     except Exception as e:
         print(f"  Could not generate heatmap for {title}: {e}")
         import traceback
@@ -1101,7 +1100,7 @@ def calculate_event_tuning(paths: DataPaths, event_file_type: str, time_window_m
                                     sort_col='peak',
                                     unit_types=unit_types)
             print(f"  Population heatmap saved to {heatmap_path}")
-            print(f"  Population heatmap saved to {heatmap_path}")
+
     except Exception as e:
         print(f"  Could not generate PETH heatmap: {e}")
 

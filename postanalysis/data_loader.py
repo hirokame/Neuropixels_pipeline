@@ -82,7 +82,6 @@ class SpikeDataLoader(DataStreamLoader):
              
         spike_times = np.load(spike_times_path, mmap_mode='r')
         spike_times_sec = spike_times.flatten()
-        logger.info(f"Loaded spike times from {spike_times_path.name}")
 
         # 2. Load Clusters
         spike_clusters_path = kilosort_dir / "spike_clusters.npy"
@@ -93,9 +92,7 @@ class SpikeDataLoader(DataStreamLoader):
         spike_clusters = spike_clusters.flatten()
         unique_clusters = np.unique(spike_clusters)
         
-        logger.info(
-            f"Loaded {len(spike_times_sec)} spikes from {len(unique_clusters)} clusters"
-        )
+        logger.info(f"Loaded {len(spike_times_sec)} spikes from {len(unique_clusters)} clusters")
         
         # 3. Load Unit Classification (if available)
         unit_types = {}
@@ -105,25 +102,24 @@ class SpikeDataLoader(DataStreamLoader):
                 df_class = pd.read_csv(classification_path)
                 if 'unit_id' in df_class.columns and 'cell_type' in df_class.columns:
                     unit_types = dict(zip(df_class['unit_id'], df_class['cell_type']))
-                    logger.info(f"Loaded {len(unit_types)} unit classifications")
             except Exception as e:
                 logger.warning(f"Failed to load unit classification: {e}")
 
         # 4. Load Unit labels
         unit_labels = {}
-        labels_path = kilosort_dir.parent / "kilosort4qMetrics" / "templates._bc_unit_labels.tsv"
+        labels_path = kilosort_dir.parent.parent / "kilosort4qMetrics" / "templates._bc_unit_labels.tsv"
         if labels_path.exists():
             try:
                 df_labels = pd.read_csv(labels_path, sep='\t')
-                if 'unit_id' in df_labels.columns and 'label' in df_labels.columns:
-                    unit_labels = dict(zip(df_labels['unit_id'], df_labels['label']))
-                    logger.info(f"Loaded {len(unit_labels)} unit labels")
+                if 'unitType' in df_labels.columns:
+                    unit_labels = df_labels['unitType'].to_dict()
             except Exception as e:
                 logger.warning(f"Failed to load unit labels: {e}")
+        else:
+            logger.warning("No unit labels available. Cannot filter by label 1 or 2. Using all units.")
         
         # --- Filter by unit_label == 1 or 2 ---
         if unit_labels:
-            # We must filter out any clusters not belonging to label 1 or 2
             valid_clusters = {cid for cid, label in unit_labels.items() if label in (1, 2)}
             
             # Mask the unique clusters
@@ -314,8 +310,6 @@ class DLCDataLoader(DataStreamLoader):
         return onset_times
 
 class EventDataLoader(DataStreamLoader):
-    """Load event CSV files with proper Frame ID synchronization."""
-    
     def load(
         self, 
         event_path: Path,
@@ -344,10 +338,7 @@ class EventDataLoader(DataStreamLoader):
         index_col = 'Index'
         if event_df[index_col].duplicated().any():
             n_dupes = event_df[index_col].duplicated().sum()
-            logger.warning(
-                f"Found {n_dupes} duplicate Frame IDs in '{index_col}'. "
-                f"Keeping last occurrence to allow synchronization."
-            )
+            logger.warning(f"Found {n_dupes} duplicate Frame IDs in '{index_col}'")
             event_df = event_df.drop_duplicates(subset=[index_col], keep='last')
 
         event_df = event_df.set_index(index_col)
@@ -389,7 +380,16 @@ class EventDataLoader(DataStreamLoader):
         try:
             if strobe_path and strobe_path.exists():
                 strobe_times = np.load(strobe_path, mmap_mode='r').flatten()
-                indices = event_df[time_column].values
+                
+                # Retrieve indices: from columns first, else from the index itself
+                if time_column in event_df.columns:
+                    indices = event_df[time_column].values
+                elif event_df.index.name == time_column:
+                    indices = event_df.index.values
+                else:
+                    logger.warning(f"Time column '{time_column}' not found in columns or index.")
+                    return np.array([])
+                    
                 valid_mask = (indices >= 0) & (indices < len(strobe_times))
                 valid_indices = indices[valid_mask].astype(int)
                 
@@ -398,6 +398,8 @@ class EventDataLoader(DataStreamLoader):
         
         except Exception as e:
             logger.warning(f"Could not map events to strobe timestamps: {e}")
+        
+        return np.array([])
 
     def load_events_from_path(
         self, 
@@ -429,7 +431,6 @@ class EventDataLoader(DataStreamLoader):
         except Exception as e:
             logger.error(f"Error loading {file_path}: {e}")
             return pd.DataFrame(), np.array([])
-
         # 2. Filter onsets
         if filter_onsets:
             df = self._filter_onsets(df)
@@ -551,76 +552,44 @@ class EventDataLoader(DataStreamLoader):
                     logger.info(f"Loaded {len(event_times)} licking events directly from {lick_npy}")
                 except Exception as e:
                     logger.warning(f"Failed to load licking_seconds.npy: {e}")
-
-        if event_times is None:
-            # Fallback to CSV loading
-            # Determine file
-            event_file = None
-            if event_type_name == 'corner':
-                event_file = paths.event_corner
-            elif event_type_name in ['licking', 'licking_bout_start']:
-                event_file = paths.event_licking
-            elif event_type_name in ['reward', 'reward_first', 'reward_second']:
-                event_file = paths.event_reward if paths.event_reward and paths.event_reward.exists() else paths.event_corner
-            else:
-                logger.error(f"Unknown event type: {event_type_name}")
-                return np.array([])
-                
-            if not event_file or not event_file.exists():
-                logger.error(f"File for {event_type_name} not found: {event_file}")
-                return np.array([])
-                
-            # Load Raw (no config key needed)
-            try:
-                event_df = self.load(event_path=event_file, sync_to_dlc=False)
-            except Exception as e:
-                logger.error(f"Failed to load event file {event_file}: {e}")
-                return np.array([])
-            
-            # Specific filtering logic moved from analyses.py
-            
-            # 1. Port Inference
-            if 'reward' in event_type_name:
-                # Infer port from Corner1-4 or Lick1-4 (if available)
-                # Usually Corner file is used for Reward.
-                # Reward itself comes from 'Water' column, but we need Port ID for splitting first/second
-                port_series = self.infer_port_id(event_df)
                     
-            # 2. Column Filtering (Water)
-            target_column = None
-            if 'reward' in event_type_name:
-                target_column = 'Water' # Look for Water column
-                water_cols = [c for c in event_df.columns if 'Water' in str(c)]
-                if water_cols:
-                    # Keep Water cols + Time/Index
-                    cols_to_keep = water_cols.copy()
-                    time_col = None
-                    for c in ['Timestamp', 'timestamp', 'Time', 'time', 'Index', 'index']:
-                        if c in event_df.columns:
-                            time_col = c
-                            break
-                     
-                    if time_col and time_col not in cols_to_keep:
-                        cols_to_keep.append(time_col)
-                    event_df = event_df[cols_to_keep]
-                else:
-                    target_column = None # Fallback to general onset
-    
-            # 3. Detect Onsets
-            event_df = self.detect_onsets(event_df, target_column=target_column)
-            
-            # 4. Post-Onset Filtering (Splitting First/Second)
-            if 'reward' in event_type_name:
-                current_ports = port_series.reindex(event_df.index).fillna(0).values
-                 
+            if event_times is None:
+                # Fallback to licking CSV
+                event_file = getattr(paths, 'event_licking', None)
+                if event_file and event_file.exists():
+                    try:
+                        event_df = self.load(event_path=event_file, sync_to_dlc=False)
+                        event_df = self.detect_onsets(event_df)
+                    except Exception as e:
+                        logger.error(f"Failed to load licking CSV {event_file}: {e}")
+
+        elif 'reward' in event_type_name:
+            event_file = getattr(paths, 'event_corner', getattr(paths, 'event_reward', None))
+            if event_file and getattr(event_file, 'exists', lambda: False)():
+                try:
+                    event_df = self.load(event_path=event_file, sync_to_dlc=False)
+                except Exception as e:
+                    logger.error(f"Failed to load event file {event_file}: {e}")
+                    return np.array([])
+                
+                if 'Water' not in event_df.columns:
+                    logger.error("Water column not found in event file.")
+                    return np.array([])
+                
+                # Directly find when Water turns from False to True (onset)
+                event_df = self.detect_onsets(event_df, target_column='Water')
+                
                 if event_type_name in ['reward_first', 'reward_second']:
+                    port_series = self.infer_port_id(event_df)
+                    current_ports = port_series.reindex(event_df.index).fillna(0).values
+                    
                     is_first = np.zeros(len(current_ports), dtype=bool)
                     is_second = np.zeros(len(current_ports), dtype=bool)
-                     
+                        
                     if len(current_ports) > 0:
                         is_first[0] = True
                         prev_port = current_ports[0]
-                         
+                            
                         for i in range(1, len(current_ports)):
                             curr_port = current_ports[i]
                             if curr_port != 0 and prev_port != 0:
@@ -630,49 +599,47 @@ class EventDataLoader(DataStreamLoader):
                                     is_first[i] = True
                             else:
                                 is_first[i] = True
-                             
+                                
                             if curr_port != 0:
                                 prev_port = curr_port
-                                 
+                                    
                     if event_type_name == 'reward_first':
                         event_df = event_df[is_first]
                         logger.info(f"Filtered for First Reward (Switch): {len(event_df)} events")
                     elif event_type_name == 'reward_second':
                         event_df = event_df[is_second]
                         logger.info(f"Filtered for Second Reward (Repeat): {len(event_df)} events")
-                      
-            elif event_type_name == 'corner':
-                 # Exclude ID 0
-                 id_col = None
-                 for c in ['CornerID', 'ID', 'id', 'Corner']:
-                     if c in event_df.columns:
-                         id_col = c
-                         break
-                 
-                 if id_col:
-                     ids = event_df[id_col].fillna(0).astype(int)
-                 else:
-                     ids = self.infer_port_id(event_df) # fallback
-                 
-                 event_df = event_df[ids != 0]
-    
-            # 5. Extract Times
-            # Attempt to find strobe file in standard location
+
+        # Extract event times from event_df if they haven't been loaded yet (like from npy)
+        if event_times is None and event_df is not None:
             strobe_path = None
-            if self.base_path:
+            
+            # Prefer using paths object which has already resolved Kilosort dir
+            if paths and getattr(paths, 'strobe_seconds', None) and paths.strobe_seconds.exists():
+                strobe_path = paths.strobe_seconds
+            elif paths and getattr(paths, 'kilosort_dir', None) and (paths.kilosort_dir / "strobe_seconds.npy").exists():
+                strobe_path = paths.kilosort_dir / "strobe_seconds.npy"
+            elif hasattr(self, 'base_path') and self.base_path:
                  potential_strobe = self.base_path / "kilosort4" / "sorter_output" / "strobe_seconds.npy"
                  if potential_strobe.exists():
                      strobe_path = potential_strobe
                  elif (self.base_path / "strobe_seconds.npy").exists():
                      strobe_path = self.base_path / "strobe_seconds.npy"
-            
+                 else:
+                     # Check if it's nested in a probe directory
+                     probe_dirs = list(self.base_path.rglob("*_imec*"))
+                     if probe_dirs:
+                         potential_strobe_nested = probe_dirs[0] / "kilosort4" / "sorter_output" / "strobe_seconds.npy"
+                         if potential_strobe_nested.exists():
+                             strobe_path = potential_strobe_nested
+                     
             event_times = self.get_event_times(event_df, strobe_path=strobe_path)
-            
+
         if event_times is None:
-            event_times = np.array([])
+            return np.array([])
             
         # Ensure times are sorted for correct filtering/PETH
-        if event_times is not None and len(event_times) > 0:
+        if len(event_times) > 0:
             event_times.sort()
 
         # 6. Post-Time Filtering (Lick Bouts)
