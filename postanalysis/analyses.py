@@ -548,81 +548,6 @@ def _plot_metric_swarm(df, col_name, output_path, title, ylabel, p_val_col='p_va
         import traceback
         traceback.print_exc()
 
-def _load_spike_data(paths: DataPaths, return_types: bool = True):
-    """
-    Loads spike times and clusters from Kilosort output.
-    
-    Refactored to use modular data loading with schema validation.
-    
-    Args:
-        paths: DataPaths object
-        return_types: If True, also returns unit_types dictionary
-        
-    Returns:
-        tuple: (spike_times_sec, spike_clusters, unique_clusters) OR
-               (spike_times_sec, spike_clusters, unique_clusters, unit_types) if return_types=True
-    """
-    try:
-        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
-        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
-        spike_loader = SpikeDataLoader(base_path)
-        spike_data = spike_loader.load(paths.kilosort_dir)
-        
-        if return_types:
-            return (
-                spike_data['spike_times_sec'],
-                spike_data['spike_clusters'],
-                spike_data['unique_clusters'],
-                spike_data.get('unit_types', {})
-            )
-        else:
-            return (
-                spike_data['spike_times_sec'],
-                spike_data['spike_clusters'],
-                spike_data['unique_clusters']
-            )
-    except Exception as e:
-        print(f"  Error loading spike data: {e}")
-        import traceback
-        traceback.print_exc()
-        if return_types:
-            return None, None, None, {}
-        return None, None, None
-
-def _load_dlc_and_calculate_velocity(paths: DataPaths, video_fs: int, px_per_cm: float):
-    """
-    Loads DLC data and calculates velocity.
-    
-    Refactored to use modular data loading with schema validation.
-    """
-    if not paths.dlc_h5 or not paths.dlc_h5.exists():
-        print(f"  Error: DLC file not found at {paths.dlc_h5}")
-        return None, None
-    
-    try:
-        base_path = paths.dlc_h5.parent if paths.dlc_h5.parent.exists() else Path('.')
-        base_path = paths.base_path
-        dlc_loader = DLCDataLoader(base_path)
-        
-        # Load DLC data
-        df_dlc = dlc_loader.load(paths.dlc_h5)
-        
-        # Calculate velocity using the loader's method
-        velocity, velocity_times = dlc_loader.calculate_velocity(
-            df_dlc,
-            video_fs=video_fs,
-            px_per_cm=px_per_cm
-        )
-        
-        print(f"  Calculated velocity for {len(velocity)} frames.")
-        return velocity, velocity_times
-
-    except Exception as e:
-        print(f"  Error loading DLC data or calculating velocity: {e}")
-        import traceback
-        traceback.print_exc()
-        return None, None
-
 def _calculate_block_tuning(trajectories, corner_order, start_time, end_time, spike_times, spike_clusters, unique_clusters):
     """
     Helper function to calculate strategy tuning index for a given block defined by [start_time, end_time].
@@ -902,7 +827,7 @@ def _load_switch_times(paths, event_loader, dlc_loader=None):
 
 def _get_behavioral_switch_points(switch_times, corner_times_onsets, corner_ids_onsets, 
                                   corner_df_full, corner_df_onsets, corner_order, 
-                                  corner_cfg, event_loader, corner_key):
+                                  event_loader, strobe_path=None):
     """
     Identifies behavioral switch points (Decision and Success) for each rule switch.
     
@@ -944,7 +869,7 @@ def _get_behavioral_switch_points(switch_times, corner_times_onsets, corner_ids_
                 if reward_col and reward_col in trial_segment.columns:
                     rewards = trial_segment[trial_segment[reward_col] == 1]
                     if not rewards.empty:
-                        success_time = event_loader.get_event_times(rewards.iloc[[0]])[0]
+                        success_time = event_loader.get_event_times(rewards.iloc[[0]], strobe_path=strobe_path)[0]
                 
                 if success_time is None:
                     success_time = corner_times_onsets[next_idx]
@@ -956,7 +881,7 @@ def _get_behavioral_switch_points(switch_times, corner_times_onsets, corner_ids_
                     active_frames = pre_trial_segment[pre_trial_segment[start_port_col] == 1].index
                     if len(active_frames) > 0:
                         departure_frame = active_frames[-1]
-                        decision_time = event_loader.get_event_times(corner_df_full.loc[[departure_frame]])[0]
+                        decision_time = event_loader.get_event_times(corner_df_full.loc[[departure_frame]], strobe_path=strobe_path)[0]
                 
                 if decision_time is None:
                     decision_time = corner_times_onsets[idx]
@@ -1036,8 +961,6 @@ def calculate_event_tuning(paths: DataPaths, event_file_type: str, time_window_m
     
     # DEBUG: Check time ranges
     if len(event_times) > 0 and len(spike_times_sec) > 0:
-        print(f"  Debug: Event times range: {event_times.min():.2f}s - {event_times.max():.2f}s")
-        print(f"  Debug: Spike times range: {spike_times_sec.min():.2f}s - {spike_times_sec.max():.2f}s")
         if event_times.max() < spike_times_sec.min() or event_times.min() > spike_times_sec.max():
             print("  WARNING: Event times and Spike times do not overlap!")
 
@@ -1057,7 +980,6 @@ def calculate_event_tuning(paths: DataPaths, event_file_type: str, time_window_m
         idx_ends = np.searchsorted(cluster_spikes, ends)
         
         # Optimize: Collect all relative times first, then histogram once
-        # List comprehension is significantly faster than repeated np.histogram calls
         valid_mask = idx_ends > idx_starts
         valid_indices = np.where(valid_mask)[0]
         
@@ -1118,14 +1040,13 @@ def calculate_movement_tuning(paths: DataPaths, video_fs: int = 60, px_per_cm: f
         if not paths.dlc_h5 or not paths.dlc_h5.exists():
             print(f"  Error: DLC file not found (path is {paths.dlc_h5}).")
             return
-
         
         base_path = paths.base_path
         dlc_loader = DLCDataLoader(base_path)
         
         df_dlc = dlc_loader.load(paths.dlc_h5)
         velocity, velocity_times = dlc_loader.calculate_velocity(
-            df_dlc, video_fs=video_fs, px_per_cm=px_per_cm
+            df_dlc, video_fs=video_fs, px_per_cm=px_per_cm, strobe_path=paths.strobe_seconds
         )
         if velocity is None:
             return
@@ -1133,9 +1054,21 @@ def calculate_movement_tuning(paths: DataPaths, video_fs: int = 60, px_per_cm: f
         print(f"  Error loading DLC data or calculating velocity: {e}")
         return
 
-    # --- 2. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters, unit_types = _load_spike_data(paths, return_types=True)
-    if spike_times_sec is None:
+    # --- 2. Load Spike Data using modular loader ---
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
 
     # --- 3. Bin Firing Rates and Kinematics ---
@@ -1256,7 +1189,8 @@ def calculate_movement_tuning(paths: DataPaths, video_fs: int = 60, px_per_cm: f
             video_fs=video_fs,
             px_per_cm=px_per_cm,
             smoothing_window_sec=0.1,
-            threshold=2.0
+            threshold=2.0,
+            strobe_path=paths.strobe_seconds
         )
         print(f"  Found {len(movement_onset_times)} movement onsets.")
 
@@ -1338,6 +1272,7 @@ def calculate_movement_tuning(paths: DataPaths, video_fs: int = 60, px_per_cm: f
 def calculate_lfp_peth(paths: DataPaths, event_file_type: str, 
                        frequency_bands: dict = None,
                        time_window_ms: int = 2000, bin_size_ms: int = 50,
+                       video_fs: int = 60, px_per_cm: float = 30.0,
                        compute_spectrogram: bool = True):
     """
     Calculate peri-event time histogram (PETH) for LFP power in different frequency bands.
@@ -1371,14 +1306,20 @@ def calculate_lfp_peth(paths: DataPaths, event_file_type: str,
     
     # --- 1. Load Event Data ---
     try:
-        
         base_path = paths.base_path
-        
         if event_file_type == 'movement_onset':
             # Use DLC Loader for movement onsets
             print("  Detecting movement onsets from DLC...")
             dlc_loader = DLCDataLoader(base_path)
-            event_times = dlc_loader.get_movement_onsets()
+            df_dlc = dlc_loader.load(paths.dlc_h5)
+            event_times = dlc_loader.get_movement_onsets(
+                df_dlc=df_dlc,
+                video_fs=video_fs,
+                px_per_cm=px_per_cm,
+                smoothing_window_sec=0.1,
+                threshold=2.0,
+                strobe_path=paths.strobe_seconds
+        )
             print(f"  Loaded {len(event_times)} movement onset events.")
             
         else:
@@ -1480,6 +1421,10 @@ def calculate_lfp_peth(paths: DataPaths, event_file_type: str,
         
         # Load CSD Trace for selected channels
         # Define the max time window needed.
+        if len(event_times) == 0:
+            print("  No valid events found. Skipping LFP extraction.")
+            return None
+            
         t_start = 0
         t_max = max(event_times) + (time_window_ms/1000.0)
         
@@ -1671,7 +1616,8 @@ def calculate_lfp_peth(paths: DataPaths, event_file_type: str,
         return None
 
 def calculate_dopamine_peth(paths: DataPaths, event_file_type: str,
-                            time_window_ms: int = 2000, bin_size_ms: int = 50):
+                            time_window_ms: int = 2000, bin_size_ms: int = 50,
+                            video_fs: int = 60, px_per_cm: float = 30.0):
     """
     Calculate peri-event time histogram (PETH) for dopamine signals.
     
@@ -1694,11 +1640,27 @@ def calculate_dopamine_peth(paths: DataPaths, event_file_type: str,
     
     # --- 1. Load Event Data ---
     try:
-        
         base_path = paths.base_path
-        event_loader = EventDataLoader(base_path)
-        event_times = event_loader.get_event_times_by_type(event_file_type, paths)
-        print(f"  Loaded {len(event_times)} {event_file_type} events.")
+        if event_file_type == 'movement_onset':
+            # Use DLC Loader for movement onsets
+            print("  Detecting movement onsets from DLC...")
+            dlc_loader = DLCDataLoader(base_path)
+            df_dlc = dlc_loader.load(paths.dlc_h5)
+            event_times = dlc_loader.get_movement_onsets(
+                df_dlc=df_dlc,
+                video_fs=video_fs,
+                px_per_cm=px_per_cm,
+                smoothing_window_sec=0.1,
+                threshold=2.0,
+                strobe_path=paths.strobe_seconds
+        )
+            print(f"  Loaded {len(event_times)} movement onset events.")
+            
+        else:
+            event_loader = EventDataLoader(base_path)
+            event_times = event_loader.get_event_times_by_type(event_file_type, paths)
+            print(f"  Loaded {len(event_times)} {event_file_type} events.")
+        
     except Exception as e:
         print(f"  Error loading event data: {e}")
         import traceback
@@ -1706,22 +1668,7 @@ def calculate_dopamine_peth(paths: DataPaths, event_file_type: str,
         return None
     
     # --- 2. Load Dopamine Data ---
-    try:
-        # Identify Dopamine dFF and RAW config keys
-        dff_config_key = None
-        raw_config_key = None
-        
-        for key, value in config.items():
-            path_str = value.get('path', '').lower()
-            if '_dff.mat' in path_str:
-                dff_config_key = key
-            if '_univraw_offdemod.mat' in path_str:
-                raw_config_key = key
-                
-        if not dff_config_key or not raw_config_key:
-            print("  Error: Could not find config entries for both dFF and UnivRAW files.")
-            return None
-            
+    try:  
         photometry_loader = PhotometryDataLoader(base_path)
         da_result = photometry_loader.load(paths.tdt_dff, paths.tdt_raw)
         
@@ -1744,7 +1691,7 @@ def calculate_dopamine_peth(paths: DataPaths, event_file_type: str,
     
     # --- 3. Calculate Dopamine PETH ---
     print("  Calculating dopamine PETH...")
-    
+        
     n_bins = int(window_sec / bin_size_sec)
     bin_edges = np.linspace(0, window_sec, n_bins + 1)
     
@@ -1852,32 +1799,22 @@ def analyze_behavioral_switch_response(paths: DataPaths, time_window_ms: int = 4
 
     # --- 1. Load Event Data with full temporal resolution ---
     try:
-        
         base_path = paths.base_path
         event_loader = EventDataLoader(base_path)
         
-        # Load Corner Data (unfiltered for temporal accuracy)
-        corner_cfg = find_config_entry(paths.event_corner)
-        corner_key = next(k for k, v in config.items() if v == corner_cfg)
-        corner_df_full = event_loader.load(config_key=corner_key, sync_to_dlc=True)
+        # Load Corner Data
+        corner_df_full = event_loader.load(event_path=paths.event_corner, sync_to_dlc=True)
+        corner_df_onsets = event_loader.detect_onsets(corner_df_full)
+        corner_times_onsets = event_loader.get_event_times(corner_df_onsets, strobe_path=paths.strobe_seconds)
         
-        # Get Corner Times and Onsets for block logic
-        corner_df_onsets = _get_event_onsets_df(corner_df_full, corner_cfg)
-        corner_times_onsets = event_loader.get_event_times(corner_df_onsets, config_key=corner_key)
-        
-        # Get Corner IDs
-        id_col = get_column_name(corner_cfg, ['CornerID', 'ID', 'id', 'Corner', 'Port'])
-        if id_col and id_col in corner_df_onsets.columns and id_col not in [f'Corner{i}' for i in range(1, 5)]:
-            corner_ids_onsets = corner_df_onsets[id_col].fillna(0).astype(int).values
-        else:
-            # Infer from boolean columns
-            ids = pd.Series(0, index=corner_df_onsets.index) # Default to 0
-            for i in range(1, 4+1):
-                col = f'Corner{i}'
-                if col in corner_df_onsets.columns:
-                    mask = corner_df_onsets[col].fillna(0).astype(int) > 0
-                    ids[mask] = i
-            corner_ids_onsets = ids.astype(int).values
+        # Inferred valid corners logic remains the same
+        ids = pd.Series(0, index=corner_df_onsets.index) # Default to 0
+        for i in range(1, 4+1):
+            col = f'Corner{i}'
+            if col in corner_df_onsets.columns:
+                mask = corner_df_onsets[col].fillna(0).astype(int) > 0
+                ids[mask] = i
+        corner_ids_onsets = ids.astype(int).values
             
         print(f"  Inferred corner IDs from boolean columns. Found {np.sum(corner_ids_onsets > 0)} valid visits.")
         
@@ -1889,34 +1826,22 @@ def analyze_behavioral_switch_response(paths: DataPaths, time_window_ms: int = 4
         print(f"  Filtering invalid (0) IDs: Retaining {len(corner_ids_onsets)} valid events.")
 
         # Load Switch Data
-        # Load Switch Data
         if paths.event_condition_switch == paths.event_corner:
             # Rule is embedded in corner file, usually in a 'CW' or 'Condition' column
-            rule_col = get_column_name(corner_cfg, ['CW', 'Condition', 'Rule', 'Protocol'])
-            if rule_col and rule_col in corner_df_full.columns:
-                # Find where the rule changes (transitions between True/False or 1/0)
-                rule_changes = corner_df_full[rule_col].diff().fillna(0) != 0
-                # The first row of the file is also a "switch" to the initial rule
-                rule_changes.iloc[0] = True 
-                switch_df_raw = corner_df_full[rule_changes]
-                switch_times = event_loader.get_event_times(switch_df_raw, config_key=corner_key)
-            else:
-                print(f"  Warning: Could not find rule column in {paths.event_corner}. Using empty switch times.")
-                switch_times = np.array([])
+            rule_col = "CW"
+            # Find where the rule changes (transitions between True/False or 1/0)
+            rule_changes = corner_df_full[rule_col].diff().fillna(0) != 0
+            # The first row of the file is also a "switch" to the initial rule
+            rule_changes.iloc[0] = True 
+            switch_df_raw = corner_df_full[rule_changes]
+            switch_times = event_loader.get_event_times(switch_df_raw, strobe_path=paths.strobe_seconds)
         else:
-            switch_cfg = find_config_entry(paths.event_condition_switch)
-            switch_key = next(k for k, v in config.items() if v == switch_cfg)
-            switch_df = event_loader.load(config_key=switch_key)
-            switch_df = _get_event_onsets_df(switch_df, switch_cfg)
-            switch_times = event_loader.get_event_times(switch_df, switch_key)
+            switch_df = event_loader.load(event_path=paths.event_condition_switch, sync_to_dlc=True)
+            switch_df = event_loader.detect_onsets(switch_df)
+            switch_times = event_loader.get_event_times(switch_df, strobe_path=paths.strobe_seconds)
         
-        # Load Licking/Reward Data if in separate file
-        reward_col = get_column_name(corner_cfg, ['Water', 'Reward', 'Reward1'])
-        if not reward_col or reward_col not in corner_df_full.columns:
-            # Fallback to licking file if specified
-            lick_df_full = event_loader.load(config_key=find_config_entry(paths.event_licking), sync_to_dlc=True)
-        else:
-            lick_df_full = corner_df_full # Combined setup
+        # Reward data is in the corner file under "Water" column
+        lick_df_full = corner_df_full
 
     except Exception as e:
         print(f"  Error loading event data: {e}")
@@ -1926,7 +1851,7 @@ def analyze_behavioral_switch_response(paths: DataPaths, time_window_ms: int = 4
     switch_points = _get_behavioral_switch_points(
         switch_times, corner_times_onsets, corner_ids_onsets, 
         corner_df_full, corner_df_onsets, corner_order, 
-        corner_cfg, event_loader, corner_key
+        event_loader, strobe_path=paths.strobe_seconds
     )
     
     success_times = [pt['success_time'] for pt in switch_points]
@@ -1935,8 +1860,21 @@ def analyze_behavioral_switch_response(paths: DataPaths, time_window_ms: int = 4
     print(f"  Identified {len(success_times)} Success events and {len(decision_times)} Decision events.")
 
     # --- 3. Run PETH Analysis for both alignment types ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None: return
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
+        return
 
     session_duration = spike_times_sec[-1] if spike_times_sec.size > 0 else 1
     baseline_rates = {cid: len(spike_times_sec[spike_clusters == cid]) / session_duration for cid in unique_clusters}
@@ -1986,8 +1924,20 @@ def analyze_port_to_port_trajectories(paths: DataPaths):
     traj_df.rename(columns={'label': 'trajectory_type'}, inplace=True)
     
     # --- 2. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
 
     # --- 3. Calculate Firing Rates per State ---
@@ -2073,28 +2023,22 @@ def analyze_strategy_encoding(paths: DataPaths, corner_order: list = [1, 2, 4, 3
         return
     
     try:
-        
-        event_loader = EventDataLoader(paths.base_path)
+        base_path = paths.base_path
+        event_loader = EventDataLoader(base_path)
         
         # Load corner events
-        corner_df, corner_times = event_loader.load_events_from_path(paths.event_corner)
-        if corner_df.empty: raise ValueError("Could not load corner events")
+        corner_df_full = event_loader.load(event_path=paths.event_corner, sync_to_dlc=True)
+        corner_df_onsets = event_loader.detect_onsets(corner_df_full)
+        corner_times = event_loader.get_event_times(corner_df_onsets, strobe_path=paths.strobe_seconds)
         
         # Get Corner IDs and Filter Invalid (0) Entries
-        corner_config_entry = find_config_entry(paths.event_corner)
-        id_col = get_column_name(corner_config_entry, ['CornerID', 'ID', 'id', 'Corner'])
-        if id_col and id_col in corner_df.columns:
-            # Use fillna(0) instead of dropna() to maintain same length as corner_times
-            corner_ids = corner_df[id_col].fillna(0).astype(int).values
-        else:
-            ids = pd.Series(0, index=corner_df.index)
-            for i in range(1, 5):
-                if f'Corner{i}' in corner_df.columns:
-                    ids[corner_df[f'Corner{i}'].fillna(False).astype(bool)] = i
-            corner_ids = ids.fillna(0).astype(int).values
+        ids = pd.Series(0, index=corner_df_onsets.index)
+        for i in range(1, 5):
+            if f'Corner{i}' in corner_df_onsets.columns:
+                ids[corner_df_onsets[f'Corner{i}'].fillna(False).astype(bool)] = i
+        corner_ids = ids.fillna(0).astype(int).values
             
         # FILTERING: Exclude 0s to preserve transition continuity
-        # Both arrays must have same length before filtering
         assert len(corner_ids) == len(corner_times), f"Length mismatch: corner_ids={len(corner_ids)}, corner_times={len(corner_times)}"
         valid_mask = corner_ids != 0
         corner_ids = corner_ids[valid_mask]
@@ -2104,8 +2048,21 @@ def analyze_strategy_encoding(paths: DataPaths, corner_order: list = [1, 2, 4, 3
             print("  Not enough valid corner events after filtering.")
             return
         
-        # Load switch data - USE HELPER that handles embedded CW column
-        switch_times = _load_switch_times(paths, event_loader, dlc_loader=None)
+        # Load switch data
+        if paths.event_condition_switch == paths.event_corner:
+            rule_col = next((c for c in ['CW', 'Condition', 'Rule', 'Protocol'] if c in corner_df_full.columns), None)
+            if rule_col:
+                rule_changes = corner_df_full[rule_col].diff().fillna(0) != 0
+                rule_changes.iloc[0] = True 
+                switch_df_raw = corner_df_full[rule_changes]
+                switch_times = event_loader.get_event_times(switch_df_raw, strobe_path=paths.strobe_seconds)
+            else:
+                print(f"  Warning: Could not find rule column in {paths.event_corner}. Using empty switch times.")
+                switch_times = np.array([])
+        else:
+            switch_df = event_loader.load(event_path=paths.event_condition_switch, sync_to_dlc=True)
+            switch_df = event_loader.detect_onsets(switch_df)
+            switch_times = event_loader.get_event_times(switch_df, strobe_path=paths.strobe_seconds)
         
         # DEBUG OUTPUT
         print(f"  DEBUG: Loaded {len(corner_ids)} valid corner IDs, {len(switch_times)} switch times")
@@ -2169,8 +2126,20 @@ def analyze_strategy_encoding(paths: DataPaths, corner_order: list = [1, 2, 4, 3
         return
     
     # --- 3. Load Spike Data and Calculate Selectivity ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     results = {}
@@ -2237,28 +2206,20 @@ def analyze_directional_tuning(paths: DataPaths, corner_order: list = [1, 2, 4, 
         return
     
     try:
-        
         base_path = paths.base_path
         event_loader = EventDataLoader(base_path)
         
         # Load corner events
-        corner_config_entry = find_config_entry(paths.event_corner)
-        corner_config_key = next(k for k, v in config.items() if v == corner_config_entry)
-        corner_df = event_loader.load(config_key=corner_config_key)
-        corner_df = _get_event_onsets_df(corner_df, corner_config_entry)
-        corner_times = event_loader.get_event_times(corner_df, corner_config_key)
+        corner_df_full = event_loader.load(event_path=paths.event_corner, sync_to_dlc=True)
+        corner_df_onsets = event_loader.detect_onsets(corner_df_full)
+        corner_times = event_loader.get_event_times(corner_df_onsets, strobe_path=paths.strobe_seconds)
         
-        # Get Corner IDs
         # Get Corner IDs and Filter Invalid (0) Entries
-        id_col = get_column_name(corner_config_entry, ['CornerID', 'ID', 'id', 'Corner'])
-        if id_col and id_col in corner_df.columns:
-            corner_ids = corner_df[id_col].fillna(0).astype(int).values
-        else:
-            ids = pd.Series(0, index=corner_df.index)
-            for i in range(1, 5):
-                if f'Corner{i}' in corner_df.columns:
-                    ids[corner_df[f'Corner{i}'].fillna(False).astype(bool)] = i
-            corner_ids = ids.fillna(0).astype(int).values
+        ids = pd.Series(0, index=corner_df_onsets.index)
+        for i in range(1, 5):
+            if f'Corner{i}' in corner_df_onsets.columns:
+                ids[corner_df_onsets[f'Corner{i}'].fillna(False).astype(bool)] = i
+        corner_ids = ids.fillna(0).astype(int).values
             
         # FILTERING: Exclude 0s to preserve transition continuity
         valid_mask = corner_ids != 0
@@ -2308,9 +2269,20 @@ def analyze_directional_tuning(paths: DataPaths, corner_order: list = [1, 2, 4, 
         return
     
     # --- 3. Load Spike Data ---
-    # Request unit types for visualization
-    spike_times_sec, spike_clusters, unique_clusters, unit_types = _load_spike_data(paths, return_types=True)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     # --- 4. Calculate Directional Preference with Statistical Testing ---
@@ -2459,25 +2431,20 @@ def analyze_context_dependent_encoding(paths: DataPaths, corner_order: list = [1
         return
     
     try:
-        
         base_path = paths.base_path
         event_loader = EventDataLoader(base_path)
         
-        corner_config_entry = find_config_entry(paths.event_corner)
-        corner_config_key = next(k for k, v in config.items() if v == corner_config_entry)
-        corner_df = event_loader.load(config_key=corner_config_key)
-        corner_df = _get_event_onsets_df(corner_df, corner_config_entry)
-        corner_times = event_loader.get_event_times(corner_df, corner_config_key)
+        # Load corner events
+        corner_df_full = event_loader.load(event_path=paths.event_corner, sync_to_dlc=True)
+        corner_df_onsets = event_loader.detect_onsets(corner_df_full)
+        corner_times = event_loader.get_event_times(corner_df_onsets, strobe_path=paths.strobe_seconds)
         
-        id_col = get_column_name(corner_config_entry, ['CornerID', 'ID', 'id', 'Corner'])
-        if id_col and id_col in corner_df.columns:
-            corner_ids = corner_df[id_col].fillna(0).astype(int).values
-        else:
-            ids = pd.Series(0, index=corner_df.index)
-            for i in range(1, 5):
-                if f'Corner{i}' in corner_df.columns:
-                    ids[corner_df[f'Corner{i}'].fillna(False).astype(bool)] = i
-            corner_ids = ids.fillna(0).astype(int).values
+        # Get Corner IDs and Filter Invalid (0) Entries
+        ids = pd.Series(0, index=corner_df_onsets.index)
+        for i in range(1, 5):
+            if f'Corner{i}' in corner_df_onsets.columns:
+                ids[corner_df_onsets[f'Corner{i}'].fillna(False).astype(bool)] = i
+        corner_ids = ids.fillna(0).astype(int).values
             
         # FILTERING: Exclude 0s to preserve transition continuity
         valid_mask = corner_ids != 0
@@ -2486,8 +2453,22 @@ def analyze_context_dependent_encoding(paths: DataPaths, corner_order: list = [1
         
         print(f"  Loaded {len(corner_times)} valid corner events.")
         
-        # Load switch times - USE HELPER that handles embedded CW column
-        switch_times = _load_switch_times(paths, event_loader, dlc_loader=None)
+        # Load switch data
+        if paths.event_condition_switch == paths.event_corner:
+            rule_col = next((c for c in ['CW', 'Condition', 'Rule', 'Protocol'] if c in corner_df_full.columns), None)
+            if rule_col:
+                rule_changes = corner_df_full[rule_col].diff().fillna(0) != 0
+                rule_changes.iloc[0] = True 
+                switch_df_raw = corner_df_full[rule_changes]
+                switch_times = event_loader.get_event_times(switch_df_raw, strobe_path=paths.strobe_seconds)
+            else:
+                print(f"  Warning: Could not find rule column in {paths.event_corner}. Using empty switch times.")
+                switch_times = np.array([])
+        else:
+            switch_df = event_loader.load(event_path=paths.event_condition_switch, sync_to_dlc=True)
+            switch_df = event_loader.detect_onsets(switch_df)
+            switch_times = event_loader.get_event_times(switch_df, strobe_path=paths.strobe_seconds)
+            
         print(f"  Loaded {len(switch_times)} rule switch events.")
         
     except Exception as e:
@@ -2530,8 +2511,20 @@ def analyze_context_dependent_encoding(paths: DataPaths, corner_order: list = [1
     print(f"  Categorized {cw_count} CW visits and {ccw_count} CCW visits based on actual transitions.")
     
     # --- 3. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters, unit_types = _load_spike_data(paths, return_types=True)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     # Helper for safe type retrieval
@@ -2739,9 +2732,8 @@ def analyze_trajectory_consistency(paths: DataPaths, output_dir: Path = None):
     
     # 1. Load Data
     try:
-        
         dlc_loader = DLCDataLoader(paths.base_path)
-        df_dlc = dlc_loader.load()
+        df_dlc = dlc_loader.load(paths.dlc_h5)
         
         # Get pixels per cm from config if available, else default
         px_per_cm = 30.0 # Default
@@ -2764,7 +2756,7 @@ def analyze_trajectory_consistency(paths: DataPaths, output_dir: Path = None):
         # Strobe times for mapping states to frames
         try:
             strobe_loader = StrobeDataLoader(paths.base_path)
-            strobe_times = strobe_loader.load()
+            strobe_times = strobe_loader.load(paths.strobe_seconds)
         except:
              # Fallback
             print("  Warning: generating linear timebase (60Hz)")
@@ -2920,9 +2912,20 @@ def analyze_trajectory_consistency(paths: DataPaths, output_dir: Path = None):
         print("  Predicting trajectory deviation from pre-movement neural activity...")
         
         # Load Spikes
-        spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-        if spike_times_sec is None:
-            print("  Skipping prediction (no spike data).")
+        try:
+            base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+            base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+            spike_loader = SpikeDataLoader(base_path)
+            spike_data = spike_loader.load(paths.kilosort_dir)
+            
+            spike_times_sec = spike_data['spike_times_sec']
+            spike_clusters = spike_data['spike_clusters']
+            unique_clusters = spike_data['unique_clusters']
+            unit_types = spike_data['unit_types']
+            unit_labels = spike_data['unit_labels']
+            
+        except Exception as e:
+            print(f"  Error loading spike data: {e}")
             return
             
         n_neurons = len(unique_clusters)
@@ -3087,140 +3090,114 @@ def analyze_spatial_rate_maps(paths: DataPaths, bin_size_cm: float = 2.0, sigma_
     """
     print("Generating spatial rate maps...")
     
-    try:
-        # 1. Load Data
-        spike_times_sec, spike_clusters, unique_clusters, unit_types = _load_spike_data(paths, return_types=True)
-        if spike_times_sec is None: return
-        
-        
-        if not paths.dlc_h5 or not paths.dlc_h5.exists():
-             print("  Error: No DLC file found for spatial mapping.")
-             return
-        
-        dlc_loader = DLCDataLoader(paths.base_path)
-        dlc_config_entry = find_config_entry(paths.dlc_h5)
-        if not dlc_config_entry:
-             print("  Error: DLC config not found.")
-             return
-             
-        dlc_config_key = next((k for k,v in config.items() if v == dlc_config_entry), None)
-        df_dlc = dlc_loader.load(config_key=dlc_config_key)
-        
-        # Extract X, Y (Snout best, then derived)
-        bp = 'Snout' # Default assumption
-        # Check if Snout is in columns
-        if isinstance(df_dlc.columns, pd.MultiIndex):
-             scorer = df_dlc.columns.levels[0][0]
-             bodyparts = df_dlc.columns.levels[1]
-             if 'Snout' in bodyparts:
-                bp = 'Snout'
-             else:
-                bp = bodyparts[0]
-                
-             x = df_dlc[scorer][bp]['x'].values
-             y = df_dlc[scorer][bp]['y'].values
-        else:
-             print("  Warning: DLC dataframe not MultiIndex. Skipping.")
-             return
-        
-        # Pixel to cm
-        px_per_cm = 30.0 # Standard assumption
-        x_cm = x / px_per_cm
-        y_cm = y / px_per_cm
-        
-        # Timebase
-        try:
-             strobe_loader = StrobeDataLoader(paths.base_path)
-             strobe_file = paths.base_path / 'kilosort4' / 'sorter_output' / 'strobe_seconds.npy'
-             if strobe_file.exists():
-                 t_pos = np.load(strobe_file)
-             else:
-                 t_pos = strobe_loader.load()
-                 
-             L = min(len(t_pos), len(x_cm))
-             t_pos = t_pos[:L]
-             x_cm = x_cm[:L]
-             y_cm = y_cm[:L]
-        except:
-             fs = 60.0 # standard
-             t_pos = np.arange(len(x_cm)) / fs
-        
-        # Remove NaNs
-        valid_pos = ~np.isnan(x_cm) & ~np.isnan(y_cm)
-        x_cm = x_cm[valid_pos]
-        y_cm = y_cm[valid_pos]
-        t_pos = t_pos[valid_pos]
-        
-        if len(x_cm) == 0:
-             print("  No valid position data found.")
-             return
-             
-        # 2. Define Grid
-        x_min, x_max = np.nanmin(x_cm), np.nanmax(x_cm)
-        y_min, y_max = np.nanmin(y_cm), np.nanmax(y_cm)
-        
-        x_edges = np.arange(x_min, x_max + bin_size_cm, bin_size_cm)
-        y_edges = np.arange(y_min, y_max + bin_size_cm, bin_size_cm)
-        
-        # 3. Calculate Occupancy Map
-        dt = np.mean(np.diff(t_pos)) if len(t_pos) > 1 else 1.0/60.0
-        occupancy, _, _ = np.histogram2d(x_cm, y_cm, bins=[x_edges, y_edges])
-        occupancy_seconds = occupancy * dt
-        
-        # 4. Calculate Rate Maps
-        output_dir = paths.neural_base / 'post_analysis' / 'rate_maps'
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        from scipy.interpolate import interp1d
-        f_x = interp1d(t_pos, x_cm, bounds_error=False, fill_value=np.nan)
-        f_y = interp1d(t_pos, y_cm, bounds_error=False, fill_value=np.nan)
-        
-        print(f"  Calculating maps for {len(unique_clusters)} clusters...")
-        
-        for cid in tqdm(unique_clusters, desc="Rate Maps"):
-             spikes = spike_times_sec[spike_clusters == cid]
-             
-             # Get position at spike time
-             spk_x = f_x(spikes)
-             spk_y = f_y(spikes)
-             
-             valid_spk = ~np.isnan(spk_x)
-             spk_x = spk_x[valid_spk]
-             spk_y = spk_y[valid_spk]
-             
-             if len(spk_x) == 0: continue
-             
-             # Spike Histogram
-             spike_hist, _, _ = np.histogram2d(spk_x, spk_y, bins=[x_edges, y_edges])
-             
-             # Smoothing
-             kernel_sigma = sigma_cm / bin_size_cm
-             
-             smooth_spikes = gaussian_filter1d(gaussian_filter1d(spike_hist, kernel_sigma, axis=0), kernel_sigma, axis=1)
-             smooth_occ = gaussian_filter1d(gaussian_filter1d(occupancy_seconds, kernel_sigma, axis=0), kernel_sigma, axis=1)
-             
-             rate_map = smooth_spikes / (smooth_occ + 1e-3)
-             rate_map[smooth_occ < 0.1] = np.nan
-             
-             # Plot
-             fig, ax = plt.subplots(figsize=(6, 5))
-             im = ax.imshow(rate_map.T, origin='lower', extent=[x_min, x_max, y_min, y_max], cmap='jet', aspect='auto')
-             plt.colorbar(im, label='Firing Rate (Hz)')
-             ax.set_title(f'Cluster {cid} - {unit_types[cid]}')
-             ax.set_xlabel('X (cm)')
-             ax.set_ylabel('Y (cm)')
-             
-             plt.savefig(output_dir / f'rate_map_cluster_{cid}.png', dpi=100)
-             plt.close(fig)
-             
-        print(f"  Rate maps saved to {output_dir}")
-             
-    except Exception as e:
-        print(f"  Error in spatial rate maps: {e}")
-        import traceback
-        traceback.print_exc()
 
-def analyze_pre_switch_activity(paths: DataPaths, pre_switch_window_sec: float = 10.0, min_trials_before_switch: int = 3):
+    # 1. Load Data
+    base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+    base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+    spike_loader = SpikeDataLoader(base_path)
+    spike_data = spike_loader.load(paths.kilosort_dir)
+    
+    spike_times_sec = spike_data['spike_times_sec']
+    spike_clusters = spike_data['spike_clusters']
+    unique_clusters = spike_data['unique_clusters']
+    unit_types = spike_data['unit_types']
+    unit_labels = spike_data['unit_labels']
+
+    if not paths.dlc_h5 or not paths.dlc_h5.exists():
+            print("  Error: No DLC file found for spatial mapping.")
+            return
+    
+    dlc_loader = DLCDataLoader(paths.base_path)
+    df_dlc = dlc_loader.load(paths.dlc_h5)
+    bp = 'Snout' # Default assumption
+    scorer = df_dlc.columns.levels[0][0]
+    x = df_dlc[scorer][bp]['x'].values
+    y = df_dlc[scorer][bp]['y'].values
+    
+    # Pixel to cm
+    px_per_cm = 30.0 # Standard assumption
+    x_cm = x / px_per_cm
+    y_cm = y / px_per_cm
+    
+    strobe_loader = StrobeDataLoader(paths.base_path)
+    t_pos = strobe_loader.load(paths.strobe_seconds)
+        
+    L = min(len(t_pos), len(x_cm))
+    t_pos = t_pos[:L]
+    x_cm = x_cm[:L]
+    y_cm = y_cm[:L]
+    
+    # Remove NaNs
+    valid_pos = ~np.isnan(x_cm) & ~np.isnan(y_cm)
+    x_cm = x_cm[valid_pos]
+    y_cm = y_cm[valid_pos]
+    t_pos = t_pos[valid_pos]
+    
+    if len(x_cm) == 0:
+            print("  No valid position data found.")
+            return
+            
+    # 2. Define Grid
+    x_min, x_max = np.nanmin(x_cm), np.nanmax(x_cm)
+    y_min, y_max = np.nanmin(y_cm), np.nanmax(y_cm)
+    
+    x_edges = np.arange(x_min, x_max + bin_size_cm, bin_size_cm)
+    y_edges = np.arange(y_min, y_max + bin_size_cm, bin_size_cm)
+    
+    # 3. Calculate Occupancy Map
+    dt = np.mean(np.diff(t_pos)) if len(t_pos) > 1 else 1.0/60.0
+    occupancy, _, _ = np.histogram2d(x_cm, y_cm, bins=[x_edges, y_edges])
+    occupancy_seconds = occupancy * dt
+    
+    # 4. Calculate Rate Maps
+    output_dir = paths.neural_base / 'post_analysis' / 'rate_maps'
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    from scipy.interpolate import interp1d
+    f_x = interp1d(t_pos, x_cm, bounds_error=False, fill_value=np.nan)
+    f_y = interp1d(t_pos, y_cm, bounds_error=False, fill_value=np.nan)
+    
+    print(f"  Calculating maps for {len(unique_clusters)} clusters...")
+    
+    for cid in tqdm(unique_clusters, desc="Rate Maps"):
+            spikes = spike_times_sec[spike_clusters == cid]
+            
+            # Get position at spike time
+            spk_x = f_x(spikes)
+            spk_y = f_y(spikes)
+            
+            valid_spk = ~np.isnan(spk_x)
+            spk_x = spk_x[valid_spk]
+            spk_y = spk_y[valid_spk]
+            
+            if len(spk_x) == 0: continue
+            
+            # Spike Histogram
+            spike_hist, _, _ = np.histogram2d(spk_x, spk_y, bins=[x_edges, y_edges])
+            
+            # Smoothing
+            kernel_sigma = sigma_cm / bin_size_cm
+            
+            smooth_spikes = gaussian_filter1d(gaussian_filter1d(spike_hist, kernel_sigma, axis=0), kernel_sigma, axis=1)
+            smooth_occ = gaussian_filter1d(gaussian_filter1d(occupancy_seconds, kernel_sigma, axis=0), kernel_sigma, axis=1)
+            
+            rate_map = smooth_spikes / (smooth_occ + 1e-3)
+            rate_map[smooth_occ < 0.1] = np.nan
+            
+            # Plot
+            fig, ax = plt.subplots(figsize=(6, 5))
+            im = ax.imshow(rate_map.T, origin='lower', extent=[x_min, x_max, y_min, y_max], cmap='jet', aspect='auto')
+            plt.colorbar(im, label='Firing Rate (Hz)')
+            ax.set_title(f'Cluster {cid} - {unit_types[cid]}')
+            ax.set_xlabel('X (cm)')
+            ax.set_ylabel('Y (cm)')
+            
+            plt.savefig(output_dir / f'rate_map_cluster_{cid}.png', dpi=100)
+            plt.close(fig)
+            
+    print(f"  Rate maps saved to {output_dir}")
+
+def analyze_pre_switch_activity(paths: DataPaths, pre_switch_window_sec: float = 10.0, min_trials_before_switch: int = 3, baseline_mode: str = 'stable_block'):
     """
     Analyzes neural changes before behavioral strategy switches.
     
@@ -3243,57 +3220,45 @@ def analyze_pre_switch_activity(paths: DataPaths, pre_switch_window_sec: float =
         print("  Error: Missing corner or condition switch event files.")
         return
     
-    try:
+    base_path = paths.base_path
+    event_loader = EventDataLoader(base_path)
+    
+    # Load corner events
+    corner_df_full = event_loader.load(event_path=paths.event_corner, sync_to_dlc=True)
+    corner_df_onsets = event_loader.detect_onsets(corner_df_full)
+    corner_times_onsets = event_loader.get_event_times(corner_df_onsets, strobe_path=paths.strobe_seconds)
+    
+    # Get Corner IDs and Filter Invalid (0) Entries
+    ids = pd.Series(0, index=corner_df_onsets.index)
+    for i in range(1, 4+1):
+        col = f'Corner{i}'
+        if col in corner_df_onsets.columns:
+            mask = corner_df_onsets[col].fillna(0).astype(int) > 0
+            ids[mask] = i
+    corner_ids_onsets = ids.astype(int).values
         
-        base_path = paths.base_path
-        event_loader = EventDataLoader(base_path)
+    # FILTERING: Exclude 0s to preserve transition continuity
+    valid_mask = corner_ids_onsets != 0
+    corner_ids_onsets = corner_ids_onsets[valid_mask]
+    corner_times_onsets = corner_times_onsets[valid_mask]
+    
+    print(f"  Filtering invalid (0) IDs: Retaining {len(corner_ids_onsets)} valid events.")   
+    print(f"First 10 corner IDs: {corner_ids_onsets[:10]}")
         
-        # Load corner events
-        corner_cfg = find_config_entry(paths.event_corner)
-        corner_key = next(k for k, v in config.items() if v == corner_cfg)
-        corner_df_full = event_loader.load(config_key=corner_key, sync_to_dlc=True)
-        corner_df_onsets = _get_event_onsets_df(corner_df_full, corner_cfg)
-        corner_times_onsets = event_loader.get_event_times(corner_df_onsets, config_key=corner_key)
-        
-        id_col = get_column_name(corner_cfg, ['CornerID', 'ID', 'id', 'Corner', 'Port'])
-        if id_col and id_col in corner_df_onsets.columns:
-            corner_ids_onsets = corner_df_onsets[id_col].fillna(0).astype(int).values
-        else:
-            ids = pd.Series(0, index=corner_df_onsets.index)
-            for i in range(1, 5):
-                if f'Corner{i}' in corner_df_onsets.columns:
-                    ids[corner_df_onsets[f'Corner{i}'].fillna(False).astype(bool)] = i
-            corner_ids_onsets = ids.astype(int).values
-            
-        # FILTERING: Exclude 0s to preserve transition continuity
-        valid_mask = corner_ids_onsets != 0
-        corner_ids_onsets = corner_ids_onsets[valid_mask]
-        corner_times_onsets = corner_times_onsets[valid_mask]
-        
-        print(f"  Filtering invalid (0) IDs: Retaining {len(corner_ids_onsets)} valid events.")
-            
-        print(f"  DEBUG: Unique corner IDs in data: {np.unique(corner_ids_onsets)}")
-        print(f"  DEBUG: First 10 corner IDs: {corner_ids_onsets[:10]}")
-            
-        # Load switch data
-        switch_times = _load_switch_times(paths, event_loader)
-        
-        # Load switch config entry for helper
-        switch_cfg = find_config_entry(paths.event_condition_switch)
-        
-        # Identify Behavioral Switch Points
-        print(f"  DEBUG: Using corner_order for pre-switch analysis: {[1, 2, 4, 3]}")
-        switch_points = _get_behavioral_switch_points(
-            switch_times, corner_times_onsets, corner_ids_onsets, 
-            corner_df_full, corner_df_onsets, [1, 2, 4, 3], # Default order
-            switch_cfg, event_loader, corner_key
-        )
-        
-        print(f"  Identified {len(switch_points)} behavioral switch points.")
-        
-    except Exception as e:
-        print(f"  Error loading event data: {e}")
-        return
+    # Load switch data
+    rule_changes = corner_df_full["CW"].diff().fillna(0) != 0
+    rule_changes.iloc[0] = True 
+    switch_df_raw = corner_df_full[rule_changes]
+    switch_times = event_loader.get_event_times(switch_df_raw, strobe_path=paths.strobe_seconds)
+    
+    # Identify Behavioral Switch Point
+    switch_points = _get_behavioral_switch_points(
+        switch_times, corner_times_onsets, corner_ids_onsets, 
+        corner_df_full, corner_df_onsets, [1, 2, 4, 3], # Default order
+        event_loader, paths.strobe_seconds
+    )
+    
+    print(f"  Identified {len(switch_points)} behavioral switch points.")
     
     # --- 2. Define Pre-Switch and Baseline Periods ---
     pre_switch_segments = []
@@ -3301,64 +3266,37 @@ def analyze_pre_switch_activity(paths: DataPaths, pre_switch_window_sec: float =
     
     for i, pt in enumerate(switch_points):
         behavioral_switch_time = pt['decision_time']
-        
-        # Pre-switch period: immediately before behavioral switch
         pre_start = behavioral_switch_time - pre_switch_window_sec
         pre_end = behavioral_switch_time
-        
-        # Count trials in pre-switch period
         n_trials_pre = np.sum((corner_times_onsets >= pre_start) & (corner_times_onsets < pre_end))
-        
-        # Ensure sufficient trials and valid time
         if n_trials_pre >= min_trials_before_switch and pre_start > 0:
-            
-            # --- Determine Baseline ---
             baseline_start = None
             baseline_end = None
-            
             if baseline_mode == 'stable_block':
-                # Need previous switch to define the block
                 if i > 0:
                     prev_switch_time = switch_points[i-1]['decision_time']
                     block_start = prev_switch_time
                     block_end = behavioral_switch_time
-                    
-                    # Identify trials in this block
                     block_trials_indices = np.where((corner_times_onsets >= block_start) & (corner_times_onsets < block_end))[0]
                     
-                    if len(block_trials_indices) > 6: # Need > 6 trials to drop 3 start and 3 end
-                        # Exclude first 3 and last 3 trials of the previous block
-                        # The block ends at the *current* switch's start (pre-switch instability).
-                        # Actually, "previous block" implies the block that is *currently* active before the switch.
-                        # So it starts at switch_points[i-1] and ends at switch_points[i].
-                        
-                        # Indices of trials within this block
-                        valid_indices = block_trials_indices[3:-3] # Drop 3 start, 3 end
-                        
+                    if len(block_trials_indices) > 6: 
+                        valid_indices = block_trials_indices[3:-3] 
                         if len(valid_indices) > 0:
                             t_start_valid = corner_times_onsets[valid_indices[0]]
                             t_end_valid = corner_times_onsets[valid_indices[-1]]
-                            
-                            # Stable block period
                             stable_duration = t_end_valid - t_start_valid
-                            
-                            # Take middle 50%
                             margin = stable_duration * 0.25
                             baseline_start = t_start_valid + margin
                             baseline_end = t_end_valid - margin
                             
-                            # Ensure it doesn't overlap with pre-switch window
                             if baseline_end > pre_start:
                                 baseline_end = pre_start
                                 if baseline_start >= baseline_end:
-                                     # Overlap is too significant, fallback or skip
                                      baseline_start = None 
                 
                 if baseline_start is None:
                      print(f"  Warning: Could not determine stable baseline for switch {i}. Falling back to fixed time offset.")
-                     # Fallback to fixed time logic below
             
-            # Default or Fallback Logic
             if baseline_start is None: 
                 baseline_start = pre_start - pre_switch_window_sec
                 baseline_end = pre_start
@@ -3374,8 +3312,20 @@ def analyze_pre_switch_activity(paths: DataPaths, pre_switch_window_sec: float =
         return
     
     # --- 3. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters, unit_types = _load_spike_data(paths, return_types=True)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     # --- 4. Calculate Firing Rates ---
@@ -3435,7 +3385,6 @@ def analyze_pre_switch_activity(paths: DataPaths, pre_switch_window_sec: float =
         }
     
     # --- 5. Save Results ---
-    print("\n  Pre-switch activity analysis complete (aligned to behavioral switch).")
     df_results = pd.DataFrame.from_dict(results, orient='index')
     df_results.index.name = 'cluster_id'
     
@@ -3817,8 +3766,20 @@ def analyze_outcome_encoding(paths: DataPaths, time_window_ms: int = 200):
         return
 
     # --- 2. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters, unit_types = _load_spike_data(paths, return_types=True)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
 
     # --- 3. Calculate Firing Rates for Each Condition ---
@@ -4001,8 +3962,20 @@ def analyze_reward_magnitude_encoding(paths: DataPaths, time_window_ms: int = 20
         return
 
     # --- 2. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters, unit_types = _load_spike_data(paths, return_types=True)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
 
     # --- 3. Calculate Firing Rates for Each Condition ---
@@ -4249,8 +4222,20 @@ def analyze_reward_history(paths: DataPaths, max_duration_sec: int = 30):
     print(f"  Defined {len(trials)} trials based on trajectories.")
 
     # --- 3. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters, unit_types = _load_spike_data(paths, return_types=True)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
 
     # --- 4. Calculate Firing Rates Based on Previous Trial Outcome ---
@@ -4772,8 +4757,21 @@ def analyze_history_dependence_glm(paths: DataPaths, n_back: int = 5, corner_ord
     # --- 4. Run Regression on Neural Activity ---
     print("  Fitting GLM to Neural Activity...")
     
-    spike_times_sec, spike_clusters, unique_clusters, unit_types = _load_spike_data(paths, return_types=True)
-    if spike_times_sec is None: return
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
+        return
     
     neural_coefs = {} # cid -> coefs
     
@@ -4981,8 +4979,20 @@ def analyze_perseveration_signals(paths: DataPaths, post_switch_window_trials: i
         return
 
     # --- 2. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters, unit_types = _load_spike_data(paths, return_types=True)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
 
     # --- 3. Load Kinematic States for precise Bout identification ---
@@ -5204,8 +5214,20 @@ def analyze_error_detection(paths: DataPaths, corner_order: list = [1, 2, 4, 3],
         return
     
     # --- 3. Load Spike Data and Calculate Firing Rates ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     results = {}
@@ -5316,8 +5338,20 @@ def analyze_decision_confidence(paths: DataPaths, corner_order: list = [1, 2, 4,
         return
     
     # --- 3. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     # --- 4. Calculate Firing Rates for Each Confidence Level ---
@@ -5422,8 +5456,20 @@ def analyze_decision_accumulation(paths: DataPaths, corner_order: list = [1, 2, 
         return
     
     # --- 2. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     # --- 3. Calculate Ramping Activity Before Choices ---
@@ -5547,8 +5593,20 @@ def analyze_choice_prediction(paths: DataPaths, time_window_sec: float = 2.0, n_
         return
     
     # --- 2. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     # --- Define Sliding Windows ---
@@ -5800,8 +5858,20 @@ def analyze_reversal_learning_dynamics(paths: DataPaths, trials_per_block: int =
         return
 
     # --- 3. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
 
     # --- 4. Analyze Adaptation Dynamics ---
@@ -5984,8 +6054,20 @@ def analyze_post_switch_adaptation(paths: DataPaths, corner_order: list = [1, 2,
         return
     
     # --- 3. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     # --- 4. Calculate Firing Rates ---
@@ -6434,8 +6516,20 @@ def analyze_population_manifolds(paths: DataPaths, method: str = 'pca', n_compon
         return
     
     # --- 1. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
         
     # --- 1b. Load Velocity Data for Filtering ---
@@ -6648,8 +6742,20 @@ def analyze_population_trajectories_by_direction(paths: DataPaths, method: str =
         return
     
     # --- 3. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     # --- 4. Extract Population Activity for Each Movement ---
@@ -6844,8 +6950,20 @@ def analyze_dimensionality_reduction(paths: DataPaths, method: str = 'pca', n_co
         return
     
     # --- 1. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     # --- 2. Create Population Activity Matrix ---
@@ -6924,8 +7042,20 @@ def analyze_phase_space_trajectories(paths: DataPaths, n_components: int = 3,
     print("Analyzing phase space trajectories...")
     
     # --- 1. Load Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     session_duration = spike_times_sec.max()
@@ -7091,8 +7221,20 @@ def analyze_ica_decomposition(paths: DataPaths, n_components: int = 10):
     print("Performing ICA decomposition...")
     
     # --- 1. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     session_duration = spike_times_sec.max()
@@ -7233,12 +7375,23 @@ def analyze_decoding_performance(paths: DataPaths, corner_order: list = [1, 2, 4
     print("Analyzing decoding performance from neural activity...")
     
     # --- 1. Load Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     try:
-        
         base_path = paths.base_path
         event_loader = EventDataLoader(base_path)
         
@@ -8123,8 +8276,20 @@ def analyze_phase_amplitude_coupling(paths: DataPaths, phase_band=(4, 12), n_bin
         return
 
     # --- 2. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
         
     # --- 3. Initialize LFP ---
@@ -8367,9 +8532,21 @@ def analyze_spike_phase_locking(paths: DataPaths, frequency_bands: dict = None,
     DEFAULT_PHASE_LOCKING_SIGNIFICANCE = 0.01
 
     # --- 1. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
-        return None
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
+        return
     
     # --- 2. Load Unit-to-Channel Mapping ---
     # Use helper to get best channel for each unit (Strategy 2: templates.npy)
@@ -8702,8 +8879,20 @@ def analyze_temporal_autocorrelation(paths: DataPaths, max_lag_ms: int = 500, bi
     print("Analyzing temporal autocorrelation...")
     
     # --- 1. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     # --- 2. Compute Autocorrelation for Each Neuron ---
@@ -8823,11 +9012,21 @@ def analyze_cross_correlation_pairs(paths: DataPaths, max_lag_ms: int = 100,
     print("Analyzing cross-correlation with Spatial & State dependency...")
     
     # --- 1. Load Data ---
-    # Spikes
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
-
     # Unit Locations (Spatial)
     print("  Loading unit locations...")
     unit_channels = _get_unit_best_channels(paths, unique_clusters) # {cid: ch_idx}
@@ -9177,8 +9376,21 @@ def analyze_bursting_behavior(paths: DataPaths, min_isi_ms: float = 10.0,
     
     # --- 1. Load Data ---
     # Spikes
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None: return
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
+        return
 
     # Velocity (for State Dependence)
     print("  Loading velocity...")
@@ -9480,8 +9692,21 @@ def analyze_isi_distribution(paths: DataPaths, n_bins: int = 100, max_isi_ms: fl
     print("Analyzing ISI distributions...")
 
     # --- 1. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None: return
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
+        return
 
     # --- 2. Calculate CV of ISI for each neuron ---
     results = {}
@@ -9596,10 +9821,16 @@ def analyze_spike_pattern_motifs(paths: DataPaths, k_motifs=8, l_bins=20, binsiz
     # --- 3. Load SeqNMF results and behavioral events ---
     try:
         H = np.load(output_dir / "H_activations.npy") # Motif activations over time
-        # The 'ends' array from build_lagged_patches in seqnmf_like.py tells us the time of each window in H
-        # Since it's not saved, we have to recalculate it.
-        spike_times_sec, _, _ = _load_spike_data(paths)
-        if spike_times_sec is None: return
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
         total_time = spike_times_sec.max()
         
         T = int(np.ceil(total_time / binsize_sec))
@@ -10261,8 +10492,20 @@ def analyze_multi_scale_temporal_encoding(paths: DataPaths, timescales_ms: list 
     print("Analyzing multi-scale temporal encoding...")
     
     # --- 1. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     session_duration = spike_times_sec.max()
@@ -10416,8 +10659,20 @@ def analyze_rank_order_coding(paths: DataPaths, time_window_ms: float = 50.0):
     print("Analyzing rank-order coding...")
     
     # --- 1. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     time_window_sec = time_window_ms / 1000.0
@@ -10558,8 +10813,20 @@ def analyze_temporal_clustering(paths: DataPaths, n_clusters: int = 5):
     print("Analyzing temporal clustering...")
     
     # --- 1. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     session_duration = spike_times_sec.max()
@@ -10815,8 +11082,20 @@ def analyze_dopamine_spike_coupling(paths: DataPaths, time_lags_ms: list = [-500
         return
     
     # --- 3. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     # --- 4. Calculate Cross-Correlation at Different Lags ---
@@ -10969,8 +11248,20 @@ def analyze_dopamine_triggered_firing(paths: DataPaths, window_ms: int = 2000, b
         return
     
     # --- 3. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     # --- 4. Calculate DTA (Dopamine-Triggered Average) for Each Neuron ---
@@ -11118,10 +11409,21 @@ def analyze_dopamine_modulation_index(paths: DataPaths, baseline_window_sec: flo
     print(f"  Low DA periods: {len(low_da_times)} samples ({len(low_da_times)/len(ts_abs)*100:.1f}%)")
     
     # --- 3. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
-    
     # --- 4. Calculate Firing Rates (Optimized) ---
     print("Calculating firing rates using vectorized state matching...")
     
@@ -11498,9 +11800,21 @@ def analyze_dopamine_phase_locking_relationship(paths: DataPaths, frequency_band
         return None
     
     # --- 3. Load Spike and LFP Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
-        return None
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
+        return
     
     # Initialize LFP Loader
     try:
@@ -11880,8 +12194,20 @@ def analyze_spatial_organization_depth(paths: DataPaths, n_depth_bins: int = 10)
     print("Analyzing spatial organization by depth...")
     
     # --- 1. Load Spike Data and Unit Positions ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     # Load unit positions from kilosort
@@ -12000,8 +12326,20 @@ def analyze_depth_tuning_by_behavior(paths: DataPaths, n_depth_bins: int = 10, c
     print("Analyzing depth-dependent behavioral tuning...")
     
     # --- 1. Load Spike Data and Depth Information ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     try:
@@ -12251,8 +12589,20 @@ def analyze_spatial_clustering(paths: DataPaths, cluster_method: str = 'kmeans',
         return
     
     # --- 1. Load Spike Data and Positions ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     try:
@@ -12348,8 +12698,20 @@ def analyze_medial_lateral_organization(paths: DataPaths, n_bins: int = 5):
     print("Analyzing medial-lateral organization...")
     
     # --- 1. Load Spike Data and Positions ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     try:
@@ -12429,8 +12791,20 @@ def analyze_multi_shank_interactions(paths: DataPaths, max_pairs: int = 500):
     print("Analyzing multi-shank interactions...")
     
     # --- 1. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     try:
@@ -12532,8 +12906,20 @@ def analyze_neural_clustering(paths: DataPaths, n_clusters: int = 5, method: str
     print(f"Performing neural clustering ({method})...")
     
     # --- 1. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     session_duration = spike_times_sec.max()
@@ -12757,8 +13143,20 @@ def analyze_functional_tuning_matrix(paths: DataPaths, corner_order: list = [1, 
     print("Creating functional tuning matrix...")
     
     # --- 1. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     session_duration = spike_times_sec.max()
@@ -13257,8 +13655,20 @@ def analyze_mutual_information(paths: DataPaths, n_behavioral_bins: int = 10,
         return
 
     # --- 2. Load Spike Data ---
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
     
     # Define Time Bins
@@ -13626,9 +14036,22 @@ def analyze_predictive_decoding(paths: DataPaths, n_folds: int = 5):
     
     # --- 1. Load Data ---
     # Neural Data
-    spike_times_sec, spike_clusters, unique_clusters = _load_spike_data(paths)
-    if spike_times_sec is None:
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        unit_labels = spike_data['unit_labels']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
         return
+
     n_neurons = len(unique_clusters)
     
     # Kinematic States (Bouts)

@@ -255,7 +255,11 @@ class DLCDataLoader(DataStreamLoader):
     def get_movement_onsets(
         self,
         df_dlc: Optional[pd.DataFrame] = None,
-        strobe_path: Optional[Path] = None
+        video_fs: int = 60,
+        px_per_cm: float = 30.0,
+        smoothing_window_sec: float = 0.1,
+        threshold: float = 2.0,
+        strobe_path: Optional[Path] = None,
     ) -> np.ndarray:
         """
         Detect movement onset times.
@@ -266,13 +270,6 @@ class DLCDataLoader(DataStreamLoader):
         Returns:
             np.array: Times of movement onset (seconds)
         """
-        if df_dlc is None:
-             raise ValueError("df_dlc must be provided. Auto-loading removed for strictness.")
-        
-        if df_dlc.empty:
-            logger.warning("Empty DLC dataframe, cannot detect onsets.")
-            return np.array([])
-            
         velocity, velocity_times = self.calculate_velocity(df_dlc, video_fs=video_fs, px_per_cm=px_per_cm, strobe_path=strobe_path)
         
         if velocity is None or len(velocity) == 0:
