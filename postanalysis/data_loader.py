@@ -430,7 +430,7 @@ class EventDataLoader(DataStreamLoader):
             return pd.DataFrame(), np.array([])
         # 2. Filter onsets
         if filter_onsets:
-            df = self._filter_onsets(df)
+            df = self.detect_onsets(df)
 
         # 3. Get times
         try:
@@ -468,7 +468,7 @@ class EventDataLoader(DataStreamLoader):
             col = f'Corner{i}'
             if col in event_df.columns:
                 # Mark rows where this corner is active and no port assigned yet
-                is_active = event_df[col].fillna(0).astype(bool)
+                is_active = pd.to_numeric(event_df[col], errors='coerce').fillna(0).astype(bool)
                 mask = is_active & (port_ids == 0)
                 port_ids[mask] = i
                 
@@ -476,7 +476,7 @@ class EventDataLoader(DataStreamLoader):
         for i in range(1, 5):
             col = f'Lick{i}'
             if col in event_df.columns:
-                is_active = event_df[col].fillna(0).astype(bool)
+                is_active = pd.to_numeric(event_df[col], errors='coerce').fillna(0).astype(bool)
                 mask = is_active & (port_ids == 0)
                 port_ids[mask] = i
                 

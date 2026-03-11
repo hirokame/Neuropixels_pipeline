@@ -10,7 +10,7 @@ trigger: always_on
 - **Dependencies:** If a library is missing, use the Pip Path above to install it.
 
 ## Data & Schema
-For rules regarding file headers, column names, and loading data, STRICTLY refer to `.agent/rules/data_schema.md` and the project's `dataset_config.json`.
+For rules regarding file headers, column names, and loading data, STRICTLY refer to `.agent/rules/data_schema.md`
 
 ## Coding rule
 - Use the existing code and logic if possible.
