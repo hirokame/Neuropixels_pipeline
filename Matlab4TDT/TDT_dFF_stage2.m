@@ -211,15 +211,8 @@ for i = 1:4
         legend(legend_txt)
     end
     
-    if ~isempty(char(mouseIDwithDOB(i)))
-        %% save data
-        dir_read = [Stem_Dir '\' char(mouseIDwithDOB(i)) '\' char(Date2check)];
-        if ~exist(dir_read); mkdir(dir_read); end
-        save([dir_read '\' char(mouseIDwithDOB(i)) '_' char(Date2check)  '_dFF.mat'],'dFF')
-        %% save figures
-        saveas(i,[dir_read '\' char(mouseIDwithDOB(i)) '_' char(Date2check)  '_dFF'],'fig')
-        saveas(i,[dir_read '\' char(mouseIDwithDOB(i)) '_' char(Date2check)  '_dFF'],'png')
-    end
+
+
 end
 %% save data
 % all boxes

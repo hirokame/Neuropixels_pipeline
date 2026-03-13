@@ -41,10 +41,7 @@ frqs_560 = 530;
 %%
 folder_name_split = split(session_name,'\');
 %% Make dir and extract box names
-date = char(datetime('today','Format','yyyy-MM-dd'));
-Save_dir  = [Save_univ_dir1 '\' date '\'];
-if ~exist(Save_univ_dir1); mkdir(Save_univ_dir1); end
-if ~exist(Save_dir);  mkdir(Save_dir); end
+if ~exist(Save_univ_dir1,'dir'); mkdir(Save_univ_dir1); end
 
 [Box_name check_folder] = extract_Box_name(session_name);
 
@@ -185,11 +182,4 @@ try
 catch
     delete(output_file)
     save(output_file,'handles','whole_session_sampleNs','orig_Fs','-v7.3')
-end
-output_file2 = [Save_dir  '/Session_' check_folder '_UnivRAW_offdemod.mat'];
-try
-    save(output_file2,'handles','whole_session_sampleNs','orig_Fs','-v7.3')
-catch
-    delete(output_file2)
-    save(output_file2,'handles','whole_session_sampleNs','orig_Fs','-v7.3')
-end
+end

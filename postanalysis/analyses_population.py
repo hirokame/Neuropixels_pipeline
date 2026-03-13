@@ -9,7 +9,8 @@ from postanalysis.data_loader import (
     EventDataLoader,
     PhotometryDataLoader,
     StrobeDataLoader,
-    LFPDataLoader
+    LFPDataLoader,
+    VAMEDataLoader
 )
 import json
 from functools import lru_cache
@@ -20,16 +21,75 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import spikeinterface.core as si
 from scipy.signal import find_peaks, butter, filtfilt, hilbert
-from scipy.stats import circmean, circstd
+from scipy.stats import circmean, circstd, ttest_1samp, ttest_ind, sem
+from scipy import stats as scipy_stats
 import seaborn as sns
 from scipy.interpolate import interp1d
 from sklearn.linear_model import LinearRegression
+from sklearn.decomposition import FastICA
+from sklearn.preprocessing import StandardScaler
 
 # Module-level constants
 DEFAULT_LFP_SAMPLING_RATE = 1000.0  # Hz
 DEFAULT_DOPAMINE_SAMPLING_RATE = 100.0  # Hz
 DEFAULT_PHASE_LOCKING_SIGNIFICANCE = 0.01  # p-value threshold
 DEFAULT_MIN_SPIKES_FOR_PHASE = 10  # Minimum spikes for time-resolved analysis
+
+
+def compute_statistics_for_tuning(data, method='ttest', pop_mean=0):
+    """
+    Computes summary statistics and significance tests for a distribution of tuning values.
+    
+    Args:
+        data (np.ndarray): Array of tuning indices or firing rates.
+        method (str): 'ttest' or 'wilcoxon'
+        pop_mean (float): Population mean to test against (default 0).
+        
+    Returns:
+        dict: Statistics including mean, sem, p-value, effect size.
+    """
+    data = np.array(data)
+    data = data[~np.isnan(data)]
+    
+    if len(data) < 2:
+        return {
+            'mean': np.nan, 'sem': np.nan, 'std': np.nan,
+            'p_value': np.nan, 'effect_size': np.nan, 'n': len(data),
+            'ci_lower': np.nan, 'ci_upper': np.nan
+        }
+    
+    mean_val = np.mean(data)
+    sem_val = sem(data)
+    std_val = np.std(data)
+    
+    if method == 'ttest':
+        t_stat, p_val = ttest_1samp(data, pop_mean)
+        # Cohen's d
+        effect_size = (mean_val - pop_mean) / std_val if std_val > 0 else 0
+    else:
+        # Wilcoxon signed-rank test
+        from scipy.stats import wilcoxon
+        try:
+            stat, p_val = wilcoxon(data - pop_mean)
+        except:
+            p_val = np.nan
+        # Non-parametric effect size (r = Z / sqrt(N))
+        effect_size = np.nan # Simplified
+        
+    # 95% Confidence Interval
+    ci_lower, ci_upper = scipy_stats.t.interval(0.95, len(data)-1, loc=mean_val, scale=sem_val)
+    
+    return {
+        'mean': mean_val,
+        'sem': sem_val,
+        'std': std_val,
+        'p_value': p_val,
+        'effect_size': effect_size,
+        'n': len(data),
+        'ci_lower': ci_lower,
+        'ci_upper': ci_upper
+    }
+
 
 
 
@@ -639,12 +699,14 @@ def _plot_shank_location(df, val_col, output_path, title, paths, p_val_col=None,
         unit_chans = _get_unit_best_channels(paths, unique_clusters)
         
         # 3. Map Units to Coordinates
-        # filter df to those we have channel info for
+        # Ensure df is unique-indexed to avoid row duplication during mapping
+        df_unique = df.loc[~df.index.duplicated(keep='first')]
+        
         valid_indices = []
         x_coords = []
         y_coords = []
         
-        for cid in df.index:
+        for cid in df_unique.index:
             if cid in unit_chans:
                 ch_idx = unit_chans[cid]
                 if ch_idx < len(chan_pos):
@@ -656,7 +718,7 @@ def _plot_shank_location(df, val_col, output_path, title, paths, p_val_col=None,
             print("  No units could be mapped to channels.")
             return
             
-        plot_df = df.loc[valid_indices].copy()
+        plot_df = df_unique.loc[valid_indices].copy()
         plot_df['_x'] = x_coords
         plot_df['_y'] = y_coords
         figsize = (6, 12) 
@@ -5107,3 +5169,1844 @@ def predict_reaction_time_multimodal(paths: DataPaths):
     except Exception as e:
         print(f"  Error generating mechanisms plot: {e}")
 
+def analyze_choice_prediction(paths: DataPaths, time_window_sec: float = 2.0, n_splits: int = 5):
+    """
+    Analyzes whether neural activity and current position can predict the next port choice.
+    Performs Sliding Window Decoding from -2s to +1s relative to current port arrival.
+    
+    Uses PCA on neural population vectors and SVM (RBF kernel) for decoding.
+    Also plots a behavioral-only baseline (port history only) to isolate neural contribution.
+    
+    Args:
+        paths (DataPaths): The DataPaths object with all the required paths.
+        time_window_sec (float): Not used (kept for API compatibility).
+        n_splits (int): Number of cross-validation splits.
+    """
+    from sklearn.model_selection import StratifiedKFold, cross_val_score
+    from sklearn.svm import SVC
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler, OneHotEncoder
+    from sklearn.pipeline import make_pipeline, Pipeline
+    from sklearn.compose import ColumnTransformer
+    from collections import Counter
+
+    print("Analyzing next choice prediction (sliding window)...")
+    
+    # --- 1. Load Corner Event Data ---
+    try:
+        event_loader = EventDataLoader(paths.base_path)
+        dlc_loader = DLCDataLoader(paths.base_path)
+        
+        df_dlc = dlc_loader.load(paths.dlc_h5)
+        corner_df_raw = event_loader.load(paths.event_corner, sync_to_dlc=True, dlc_data=df_dlc)
+             
+        corner_df = event_loader.detect_onsets(corner_df_raw)
+        corner_ids = event_loader.infer_port_id(corner_df).values
+        corner_times = event_loader.get_event_times(corner_df, paths.strobe_seconds)
+        
+        if corner_df.empty or len(corner_times) == 0:
+            print(f"  Error: Could not load valid corner data or times from {paths.event_corner}")
+            return
+            
+        valid_mask = corner_ids != 0
+        if len(corner_times) != len(corner_ids):
+            print("  Warning: corner times and IDs length mismatch.")
+            return
+
+        corner_ids = corner_ids[valid_mask]
+        corner_times = corner_times[valid_mask]
+        
+        print(f"  Loaded {len(corner_times)} valid corner events.")
+        
+    except Exception as e:
+        print(f"  Error loading corner event data: {e}")
+        import traceback
+        traceback.print_exc()
+        return
+    
+    # --- 2. Load Spike Data ---
+    try:
+        base_path = paths.neural_base.parent if paths.neural_base else Path('.')
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
+        return
+    
+    # --- 3. Pre-sort spikes per cluster for vectorized counting ---
+    print(f"  Pre-sorting spikes for {len(unique_clusters)} clusters...")
+    sorted_spikes = {}
+    for cid in unique_clusters:
+        sorted_spikes[cid] = np.sort(spike_times_sec[spike_clusters == cid])
+    
+    # --- 4. Build trial structure ---
+    if len(corner_ids) < 3:
+        print("  Not enough trials for history-based decoding.")
+        return
+        
+    next_ids = corner_ids[2:]
+    current_ids = corner_ids[1:-1]
+    prev_ids = corner_ids[:-2]
+    current_times = corner_times[1:-1]
+    
+    counts = Counter(next_ids)
+    valid_classes = [k for k, v in counts.items() if v >= n_splits]
+    
+    if len(valid_classes) < 2:
+        print("  Not enough classes/samples for decoding.")
+        return
+        
+    final_mask = np.isin(next_ids, valid_classes)
+    y = next_ids[final_mask]
+    target_times = current_times[final_mask]
+    n_trials = len(y)
+    
+    pos_current = current_ids[final_mask]
+    pos_prev = prev_ids[final_mask]
+    pos_features = np.column_stack([pos_current, pos_prev])
+    
+    print(f"  {n_trials} trials, {len(valid_classes)} classes, {len(unique_clusters)} clusters")
+    
+    # --- 5. Sliding window decoding ---
+    window_width = 0.04
+    step_size = 0.02
+    t_min, t_max = -0.8, 0.4
+    # Select top-k most informative neurons via ANOVA F-test (avoids PCA noise issue)
+    n_select = min(20, len(unique_clusters))
+    
+    window_starts = np.arange(t_min, t_max, step_size)
+    acc_combined = []
+    sem_combined = []
+    acc_neural_only = []
+    sem_neural_only = []
+    times = []
+    
+    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    
+    from sklearn.feature_selection import SelectKBest, f_classif
+    from sklearn.linear_model import LogisticRegression
+    
+    print(f"  Running L1-LogReg decoder on {len(window_starts)} windows ({t_min}s to {t_max}s, ANOVA top-{n_select})...")
+    
+    for t_start in tqdm(window_starts):
+        t_end = t_start + window_width
+        win_center = t_start + window_width / 2
+        
+        # Vectorized spike counting using searchsorted
+        spike_matrix = np.zeros((n_trials, len(unique_clusters)))
+        for j, cid in enumerate(unique_clusters):
+            st = sorted_spikes[cid]
+            for i, eta in enumerate(target_times):
+                w_start = eta + t_start
+                w_end = eta + t_end
+                spike_matrix[i, j] = (np.searchsorted(st, w_end) - np.searchsorted(st, w_start)) / window_width
+        
+        # --- Neural-only decoder (ANOVA select + L1 LogReg) ---
+        clf_neural = make_pipeline(
+            StandardScaler(),
+            SelectKBest(f_classif, k=n_select),
+            LogisticRegression(penalty='l1', C=0.1, solver='saga', max_iter=1000, random_state=42)
+        )
+        scores_n = cross_val_score(clf_neural, spike_matrix, y, cv=cv, n_jobs=-1)
+        acc_neural_only.append(np.mean(scores_n))
+        sem_neural_only.append(np.std(scores_n) / np.sqrt(len(scores_n)))
+        
+        # --- Combined decoder (position one-hot + selected neural) ---
+        # One-hot encode position features
+        ohe = OneHotEncoder(categories='auto', handle_unknown='ignore', sparse_output=False)
+        pos_ohe = ohe.fit_transform(pos_features)
+        
+        # Scale and select neural features
+        scaler = StandardScaler()
+        spike_scaled = scaler.fit_transform(spike_matrix)
+        selector = SelectKBest(f_classif, k=n_select)
+        spike_selected = selector.fit_transform(spike_scaled, y)
+        
+        X_combined = np.hstack([pos_ohe, spike_selected])
+        
+        clf_combined = LogisticRegression(penalty='l1', C=0.1, solver='saga', max_iter=1000, random_state=42)
+        scores_c = cross_val_score(clf_combined, X_combined, y, cv=cv, n_jobs=-1)
+        acc_combined.append(np.mean(scores_c))
+        sem_combined.append(np.std(scores_c) / np.sqrt(len(scores_c)))
+        
+        times.append(win_center)
+    
+    # --- 6. Behavioral-only baseline (position history, no spikes) ---
+    print("  Computing behavioral-only baseline...")
+    ohe_beh = OneHotEncoder(categories='auto', handle_unknown='ignore', sparse_output=False)
+    pos_ohe_beh = ohe_beh.fit_transform(pos_features)
+    clf_beh = LogisticRegression(penalty='l1', C=0.1, solver='saga', max_iter=1000, random_state=42)
+    beh_scores = cross_val_score(clf_beh, pos_ohe_beh, y, cv=cv, n_jobs=-1)
+    baseline_acc = np.mean(beh_scores)
+    
+    # --- 7. Plotting ---
+    acc_combined = np.array(acc_combined)
+    sem_combined = np.array(sem_combined)
+    acc_neural_only = np.array(acc_neural_only)
+    sem_neural_only = np.array(sem_neural_only)
+    times = np.array(times)
+    chance_level = 1.0 / len(valid_classes)
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Neural + Position
+    ax.fill_between(times, acc_combined - sem_combined, acc_combined + sem_combined,
+                    color='steelblue', alpha=0.2)
+    ax.plot(times, acc_combined, 'steelblue', linewidth=2.5, label='Neural + Position')
+    
+    # Neural only
+    ax.fill_between(times, acc_neural_only - sem_neural_only, acc_neural_only + sem_neural_only,
+                    color='mediumseagreen', alpha=0.2)
+    ax.plot(times, acc_neural_only, 'mediumseagreen', linewidth=2, linestyle='--', label='Neural only')
+    
+    # Baselines
+    ax.axhline(baseline_acc, color='darkorange', linestyle='-', linewidth=1.5, alpha=0.8,
+               label=f'Position-only ({baseline_acc:.1%})')
+    ax.axhline(chance_level, color='gray', linestyle=':', linewidth=1, label=f'Chance ({chance_level:.1%})')
+    ax.axvline(0, color='red', linestyle='--', alpha=0.6, linewidth=1.5, label='Port Arrival')
+    
+    ax.set_xlabel('Time relative to current port arrival (s)', fontsize=12)
+    ax.set_ylabel('Next Port Decoding Accuracy', fontsize=12)
+    ax.set_title('Next Port Prediction (ANOVA + L1 LogReg)', fontsize=14)
+    ax.legend(loc='upper left', fontsize=10)
+    ax.set_xlim([t_min, t_max])
+    ax.grid(True, alpha=0.2)
+    plt.tight_layout()
+    
+    out_dir = paths.neural_base / 'post_analysis'
+    out_dir.mkdir(exist_ok=True)
+    plt.savefig(out_dir / 'decoding_sliding_window_next_port.png', dpi=200)
+    plt.close()
+    print(f"  Saved decoding plot to {out_dir / 'decoding_sliding_window_next_port.png'}")
+    
+    # Save CSV
+    df = pd.DataFrame({
+        'time': times,
+        'acc_combined': acc_combined,
+        'sem_combined': sem_combined,
+        'acc_neural_only': acc_neural_only,
+        'sem_neural_only': sem_neural_only
+    })
+    df.to_csv(out_dir / 'decoding_sliding_window_next_port.csv', index=False)
+    
+    peak_comb = np.max(acc_combined)
+    peak_time_c = times[np.argmax(acc_combined)]
+    peak_neur = np.max(acc_neural_only)
+    peak_time_n = times[np.argmax(acc_neural_only)]
+    print(f"  Peak combined: {peak_comb:.1%} at t={peak_time_c:+.2f}s")
+    print(f"  Peak neural-only: {peak_neur:.1%} at t={peak_time_n:+.2f}s")
+    print(f"  Position-only baseline: {baseline_acc:.1%}, Chance: {chance_level:.1%}")
+
+
+def analyze_population_statistics(paths: DataPaths, n_clusters: int = 8):
+    """
+    Refactored and refined function to compute population-level statistics and cluster neurons 
+    based on their tuning characteristics, then plot their shank locations.
+    
+    Phase 2 Improvements:
+    - Feature deduplication and filtering (NaN threshold, low variance).
+    - Median imputation for missing values.
+    - PCA for dimensionality reduction before clustering.
+    - Clustered heatmap for variable correlations.
+    - NEW: Automatic summary of cluster characteristics.
+    """
+    print("\n" + "="*80)
+    print("RUNNING REFINED POPULATION STATISTICS & CLUSTERING")
+    print("="*80)
+    
+    output_dir = paths.neural_base / 'post_analysis'
+    output_dir.mkdir(exist_ok=True)
+    
+    # --- 1. Load and Merge Analysis Results ---
+    # We now select only ONE primary modulation metric per file.
+    # PETH files are excluded to avoid loading multiple bins.
+    # Config format: {analysis_name: (filename, preferred_column_name)}
+    analysis_configs = {
+        'movement': ('FR_velocity_data.csv', 'modulation_index'),
+        'acceleration': ('FR_acceleration_data.csv', 'modulation_index'),
+        'turn': ('FR_turn_data.csv', 'modulation_index'),
+        'directional': ('directional_tuning.csv', 'direction_index'),
+        'strategy': ('strategy_tuning_indices.csv', 'strategy_index'),
+        'rpe': ('reward_prediction_error.csv', 'pe_correlation'),
+        'phase_locking': ('spike_phase_locking_data.csv', 'm_resultant_vector_lfp'),
+        'reward_history': ('reward_history_effects.csv', 'reward_history_index'),
+        'reward_magnitude': ('reward_magnitude_encoding_postwindow.csv', 'post_magnitude_modulation_index'),
+        'outcome': ('outcome_encoding.csv', 'outcome_modulation_index'),
+        'pre_switch': ('pre_switch_activity.csv', 'pre_switch_modulation_index'),
+        'context': ('context_dependent_encoding.csv', 'context_modulation_index'),
+        'confidence': ('decision_confidence.csv', 'confidence_modulation_index'),
+        'switch_decision': ('behavioral_switch_decision.csv', 'mean_normalized_rate'),
+        'switch_success': ('behavioral_switch_success.csv', 'mean_normalized_rate'),
+    }
+    
+    results = {}
+    merged_df = None
+    
+    print("  Aggregating selective analysis results (Single Metric per source)...")
+    for name, (filename, metric_col) in analysis_configs.items():
+        filepath = output_dir / filename
+        if filepath.exists():
+            try:
+                df = pd.read_csv(filepath)
+                # Handle standard cluster/unit ID columns
+                if 'cluster_id' in df.columns:
+                    df = df.set_index('cluster_id')
+                elif 'unit_id' in df.columns:
+                    df = df.rename(columns={'unit_id': 'cluster_id'}).set_index('cluster_id')
+                
+                # Metric Selection Logic
+                if metric_col in df.columns:
+                    # Case 1: The metric already exists in the file
+                    series = df[metric_col]
+                else:
+                    # Case 2: Metric doesn't exist, calculate modulation from numeric columns (e.g. bins)
+                    # Filter for numeric columns after dropping typical ID/Metadata cols
+                    cols_to_drop = ['p_value', 'is_significant', 'statistic', 'type', 'preferred_angle', 'Unnamed: 0']
+                    tuning_data = df.select_dtypes(include=[np.number]).drop(columns=[c for c in cols_to_drop if c in df.columns], errors='ignore')
+                    
+                    if not tuning_data.empty:
+                        # Simple modulation index: (max - min) / (max + 1e-6)
+                        series = (tuning_data.max(axis=1) - tuning_data.min(axis=1)) / (tuning_data.max(axis=1) + 1e-6)
+                    else:
+                        print(f"    - Warning: No numeric data found in {filename} to calculate modulation.")
+                        continue
+                
+                # Wrap in DataFrame and prefix
+                selected_df = pd.DataFrame({f"{name}_modulation": series})
+                
+                # Ensure unique index by aggregating (mean) if multiple rows exist for a unit (e.g. across ports)
+                selected_df = selected_df.groupby(selected_df.index).mean()
+                
+                if merged_df is None:
+                    merged_df = selected_df
+                else:
+                    merged_df = merged_df.join(selected_df, how='outer')
+                
+                print(f"    - Loaded {name}: metric '{metric_col if metric_col in df.columns else 'calculated'}'")
+            except Exception as e:
+                print(f"    - Could not process {name}: {e}")
+                
+    if merged_df is None or merged_df.empty:
+        print("  No analysis results found to aggregate. Aborting.")
+        return
+    
+    # --- 2. Feature Selection & Data Cleaning ---
+    print("\n  Cleaning and filtering features...")
+    # 2.1 Drop duplicate columns (exact same name and data)
+    merged_df = merged_df.loc[:, ~merged_df.columns.duplicated()]
+    
+    # 2.2 Drop features with too many NaNs (>50%)
+    nan_limit = 0.5 * len(merged_df)
+    cols_before = len(merged_df.columns)
+    merged_df = merged_df.dropna(axis=1, thresh=len(merged_df) - int(nan_limit))
+    cols_after = len(merged_df.columns)
+    if cols_before != cols_after:
+        print(f"    - Dropped {cols_before - cols_after} columns with >50% NaNs.")
+    
+    # 2.3 Drop columns with near-zero variance (collapsed columns)
+    variances = merged_df.var()
+    low_var_cols = variances[variances < 1e-6].index
+    if len(low_var_cols) > 0:
+        merged_df = merged_df.drop(columns=low_var_cols)
+        print(f"    - Dropped {len(low_var_cols)} columns with near-zero variance.")
+        
+    # --- 3. Compute Summary Statistics ---
+    print("\n  Computing aggregate population statistics...")
+    summary_stats = []
+    for col in merged_df.columns:
+        stats = compute_statistics_for_tuning(merged_df[col].values)
+        stats['variable'] = col
+        summary_stats.append(stats)
+        
+    df_summary = pd.DataFrame(summary_stats).set_index('variable')
+    summary_path = output_dir / 'population_statistics_summary.csv'
+    df_summary.to_csv(summary_path)
+    print(f"    - Summary statistics saved to {summary_path}")
+    
+    # --- 4. Advanced Clustering (PCA + KMeans) ---
+    print(f"\n  Performing dimensionality reduction and clustering (n={n_clusters})...")
+    from sklearn.cluster import KMeans
+    from sklearn.impute import SimpleImputer
+    from sklearn.decomposition import PCA
+    
+    # 4.1 Impute missing values with Median (more robust than constant 0)
+    imputer = SimpleImputer(strategy='median')
+    X_imputed = imputer.fit_transform(merged_df)
+    
+    # 4.2 Scale features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_imputed)
+    
+    # 4.3 PCA for noise reduction and collapsing PETH bins
+    pca = PCA(n_components=0.90, random_state=42)
+    X_pca = pca.fit_transform(X_scaled)
+    print(f"    - PCA reduced {len(merged_df.columns)} features to {X_pca.shape[1]} components (90% var).")
+    
+    # 4.4 KMeans on PCA space
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=20)
+    clusters = kmeans.fit_predict(X_pca)
+    
+    merged_df['cluster_group'] = [f"Group {c}" for c in clusters]
+    cluster_results_path = output_dir / 'neuron_tuning_clusters.csv'
+    merged_df[['cluster_group']].to_csv(cluster_results_path)
+    print(f"    - Clustering results saved to {cluster_results_path}")
+    
+    # --- 5. Cluster Characterization (WHAT EACH GROUP MEANS) ---
+    print("\n  Summarizing cluster characteristics...")
+    # Calculate mean feature profile for each cluster in original scaled feature space
+    # (Using scaled space makes magnitudes comparable)
+    cluster_profiles = []
+    for c in range(n_clusters):
+        group_mask = (clusters == c)
+        if group_mask.any():
+            profile = np.mean(X_scaled[group_mask], axis=0)
+            cluster_profiles.append(profile)
+    
+    cluster_profiles = np.array(cluster_profiles)
+    feature_names = merged_df.drop(columns=['cluster_group']).columns
+    
+    # Identify signature features for each cluster
+    cluster_definitions = []
+    feature_names = merged_df.drop(columns=['cluster_group']).columns
+    
+    for c in range(len(cluster_profiles)):
+        profile = cluster_profiles[c]
+        
+        # Check if this is a "baseline" group (low modulation across all features)
+        max_abs_z = np.max(np.abs(profile))
+        is_baseline = max_abs_z < 0.5 
+        
+        # Identify top positive and negative features
+        # Sort by magnitude but keep sign
+        pos_indices = np.where(profile > 0.2)[0]
+        neg_indices = np.where(profile < -0.2)[0]
+        
+        # Sort by strength
+        pos_features = sorted([(feature_names[i], profile[i]) for i in pos_indices], key=lambda x: x[1], reverse=True)[:5]
+        neg_features = sorted([(feature_names[i], profile[i]) for i in neg_indices], key=lambda x: x[1])[:5]
+        
+        summary_parts = []
+        if is_baseline:
+            summary_parts.append("BASELINE / STATIC (Low modulation across all features)")
+        
+        if pos_features:
+            summary_parts.append("High (+): " + ", ".join([f"{n} (z={v:.2f})" for n, v in pos_features]))
+        if neg_features:
+            summary_parts.append("Low (-): " + ", ".join([f"{n} (z={v:.2f})" for n, v in neg_features]))
+            
+        cluster_definitions.append({
+            'cluster': f"Group {c}",
+            'n_neurons': np.sum(clusters == c),
+            'interpretation': "Baseline/Low-mod" if is_baseline else "Active Participant",
+            'top_features': " | ".join(summary_parts) if summary_parts else "No significant features"
+        })
+    
+    df_definitions = pd.DataFrame(cluster_definitions)
+    defs_path = output_dir / 'cluster_definitions.csv'
+    df_definitions.to_csv(defs_path, index=False)
+    
+    print("\n  --- Cluster Meaning Summary ---")
+    for _, row in df_definitions.iterrows():
+        print(f"  {row['cluster']} (n={row['n_neurons']}, type={row['interpretation']}):")
+        # Split into lines for readability if too long
+        parts = row['top_features'].split(" | ")
+        for p in parts:
+            print(f"    {p}")
+        
+    # --- 6. Enhanced Visualization ---
+    print("\n  Generating enhanced visualizations...")
+    
+    # 6.1 Shank Location with CATEGORICAL display
+    print("    - Generating shank location plot...")
+    shank_plot_path = output_dir / 'population_clusters_shank.png'
+    
+    _plot_shank_location(
+        merged_df, 
+        val_col='cluster_group', 
+        output_path=shank_plot_path, 
+        title=f'Functional Neuron Clusters (n={n_clusters})', 
+        paths=paths,
+        colormap_center=None
+    )
+    
+    # 6.2 Population Feature Modulation Heatmap (Neurons vs Features)
+    print("    - Generating population feature modulation heatmap...")
+    try:
+        # Create a DataFrame of scaled features for all neurons
+        feat_df = pd.DataFrame(X_scaled, columns=feature_names, index=merged_df.index)
+        feat_df['cluster'] = clusters # Numeric cluster for sorting
+        
+        # Sort by cluster group
+        feat_df_sorted = feat_df.sort_values(by='cluster')
+        
+        # Determine cluster boundaries for vertical lines
+        cluster_counts = feat_df_sorted['cluster'].value_counts().sort_index()
+        boundaries = np.cumsum(cluster_counts.values)
+        
+        # Prepare data for plotting (features on Y, neurons on X)
+        # Transpose so features are rows, neurons are columns
+        plot_data = feat_df_sorted.drop(columns=['cluster']).T
+        
+        plt.figure(figsize=(24, 18))
+        ax = sns.heatmap(plot_data, cmap='RdBu_r', center=0, vmin=-2, vmax=2, 
+                        cbar_kws={'label': 'Modulation (z-score)'})
+        
+        # Add vertical lines at group boundaries
+        for b in boundaries[:-1]:
+            ax.axvline(x=b, color='black', linestyle='-', linewidth=2)
+            
+        # Add cluster labels at the top
+        current_pos = 0
+        for i, count in enumerate(cluster_counts.values):
+            center_pos = current_pos + count / 2
+            ax.text(center_pos, -2, f"Group {i}", ha='center', va='bottom', 
+                    fontweight='bold', fontsize=12)
+            current_pos += count
+
+        plt.title(f'Population Tuning Profile (n={len(merged_df)} neurons, {n_clusters} clusters)', 
+                  fontsize=20, pad=30)
+        plt.xlabel('Individual Neurons (Sorted by Cluster Group)', fontsize=14)
+        plt.ylabel('Tuning Features', fontsize=14)
+        
+        # Use smaller font for feature names if there are many
+        if len(feature_names) > 50:
+            plt.setp(ax.get_yticklabels(), fontsize=6)
+        
+        # Clean up X-axis (too many neurons to label individual IDs)
+        ax.set_xticks([])
+        
+        plot_path = output_dir / 'population_feature_modulation_heatmap.png'
+        plt.tight_layout()
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"    - Population modulation heatmap saved to {plot_path}")
+        
+    except Exception as e:
+        print(f"    - Could not generate population heatmap: {e}")
+        import traceback
+        traceback.print_exc()
+        
+    print("\nREFINED POPULATION ANALYSIS COMPLETE.")
+    print(f"All results saved to: {output_dir}")
+    print("="*80 + "\n")
+    
+    return merged_df
+
+def analyze_population_manifolds(paths: DataPaths, method: str = 'pca', n_components: int = 3, time_bin_ms: int = 100, min_velocity: float = 5.0, smooth_sigma: int = 3):
+    """
+    Analyzes low-dimensional population trajectories using dimensionality reduction
+    with Gaussian-smoothed firing rates.
+
+    Produces four figures:
+      1. 3D scatter colored by behavioral state (moving, licking, resting)
+      2. 3D trajectory line for the entire session
+      3. Trial-averaged trajectory aligned to first lick at port (±0.5s, rewarded vs non-rewarded)
+      4. Trial-averaged trajectory aligned to movement onset (±0.5s, rewarded vs non-rewarded)
+
+    Args:
+        paths (DataPaths): The DataPaths object with all the required paths.
+        method (str): Dimensionality reduction method ('pca', 'tsne', or 'umap').
+        n_components (int): Number of dimensions to reduce to (must be >= 3 for 3D plots).
+        time_bin_ms (int): Time bin size for discretizing activity.
+        min_velocity (float): Minimum velocity (cm/s) threshold for 'moving' state label.
+        smooth_sigma (int): Gaussian smoothing sigma in units of time bins (applied before reduction).
+    """
+    print(f"Analyzing population manifolds using {method.upper()} (smooth_sigma={smooth_sigma})...")
+
+    try:
+        from sklearn.decomposition import PCA
+        if method == 'tsne':
+            from sklearn.manifold import TSNE
+        elif method == 'umap':
+            import umap
+    except ImportError as e:
+        print(f"  Error: Required library not found - {e}")
+        print("  Install with: pip install sklearn umap-learn")
+        return
+
+    if n_components < 3:
+        print("  Warning: n_components increased to 3 for 3D plotting.")
+        n_components = 3
+
+    # --- 1. Load Spike Data ---
+    try:
+        spike_loader = SpikeDataLoader(paths.base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
+        return
+
+    # --- 1b. Load Velocity & DLC ---
+    velocity = None
+    velocity_times = None
+    dlc_loader = None
+    df_dlc = None
+    if paths.dlc_h5 and paths.dlc_h5.exists():
+        try:
+            dlc_loader = DLCDataLoader(paths.base_path)
+            df_dlc = dlc_loader.load(paths.dlc_h5)
+            velocity, velocity_times = dlc_loader.calculate_velocity(
+                df_dlc, video_fs=60, px_per_cm=30.0, strobe_path=paths.strobe_seconds
+            )
+        except Exception as e:
+            print(f"  Warning: Could not load velocity ({e}).")
+
+    # --- 1c. Load Event Data (licking, reward, corner, movement onsets) ---
+    event_loader = EventDataLoader(paths.base_path)
+
+    lick_times = np.array([])
+    try:
+        lick_times = event_loader.get_event_times_by_type('licking', paths, dlc_loader=dlc_loader)
+        print(f"  Loaded {len(lick_times)} lick events.")
+    except Exception as e:
+        print(f"  Warning: Could not load lick events: {e}")
+
+    reward_times = np.array([])
+    try:
+        reward_times = event_loader.get_event_times_by_type('reward', paths, dlc_loader=dlc_loader)
+        print(f"  Loaded {len(reward_times)} reward events.")
+    except Exception as e:
+        print(f"  Warning: Could not load reward events: {e}")
+
+    corner_times = np.array([])
+    try:
+        corner_df_raw = event_loader.load(paths.event_corner, sync_to_dlc=True, dlc_data=df_dlc)
+        corner_cols = [c for c in corner_df_raw.columns if c.startswith('Corner')]
+        if corner_cols:
+            vals = corner_df_raw[corner_cols].fillna(0).astype(float)
+            any_corner_active = vals.max(axis=1)
+            onsets = (any_corner_active.diff().fillna(0) > 0) & (any_corner_active > 0)
+            corner_onset_df = corner_df_raw[onsets]
+        else:
+            corner_onset_df = event_loader.detect_onsets(corner_df_raw)
+        corner_times = event_loader.get_event_times(corner_onset_df, strobe_path=paths.strobe_seconds)
+        print(f"  Loaded {len(corner_times)} corner arrival events (Corner columns only).")
+    except Exception as e:
+        print(f"  Warning: Could not load corner events: {e}")
+
+    movement_onsets = np.array([])
+    if dlc_loader is not None and df_dlc is not None:
+        try:
+            movement_onsets = dlc_loader.get_movement_onsets(
+                df_dlc=df_dlc, strobe_path=paths.strobe_seconds
+            )
+            print(f"  Loaded {len(movement_onsets)} movement onset events.")
+        except Exception as e:
+            print(f"  Warning: Could not load movement onsets: {e}")
+
+    # --- 2. Bin Population Activity ---
+    session_duration = spike_times_sec.max()
+    bin_size_sec = time_bin_ms / 1000.0
+    n_bins = int(np.ceil(session_duration / bin_size_sec))
+    bin_edges = np.arange(n_bins + 1) * bin_size_sec
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+
+    print(f"  Binning activity into {n_bins} bins of {time_bin_ms}ms...")
+
+    population_matrix = np.zeros((n_bins, len(unique_clusters)))
+    for i, cid in enumerate(unique_clusters):
+        cluster_spikes = spike_times_sec[spike_clusters == cid]
+        hist, _ = np.histogram(cluster_spikes, bins=n_bins, range=(0, session_duration))
+        population_matrix[:, i] = hist / bin_size_sec
+
+    # --- 2b. Gaussian smoothing of firing rates ---
+    if smooth_sigma > 0:
+        print(f"  Applying Gaussian smoothing (sigma={smooth_sigma} bins = {smooth_sigma * bin_size_sec:.0f}ms)...")
+        population_matrix = gaussian_filter1d(population_matrix, sigma=smooth_sigma, axis=0)
+
+    # --- 2c. Behavioral state labels (for ALL bins, before any filtering) ---
+    state_labels = np.full(n_bins, 'Resting', dtype=object)
+
+    if velocity is not None and velocity_times is not None and len(velocity) > 0:
+        bin_velocities = np.interp(bin_centers, velocity_times, velocity)
+        state_labels[bin_velocities > min_velocity] = 'Moving'
+
+    try:
+        if 'corner_df_raw' in dir() and corner_df_raw is not None:
+            lick_cols = [c for c in corner_df_raw.columns if c.startswith('Lick')]
+            if lick_cols:
+                lick_active = corner_df_raw[lick_cols].fillna(0).astype(float).max(axis=1) > 0
+                licking_frame_indices = lick_active[lick_active].index.values
+                strobe_times = np.load(paths.strobe_seconds, mmap_mode='r').flatten()
+                valid = (licking_frame_indices >= 0) & (licking_frame_indices < len(strobe_times))
+                licking_abs_times = strobe_times[licking_frame_indices[valid].astype(int)]
+                for lt in licking_abs_times:
+                    idx = int(lt / bin_size_sec)
+                    if 0 <= idx < n_bins:
+                        state_labels[idx] = 'Licking'
+                print(f"  Licking state: {np.sum(state_labels == 'Licking')} bins from {len(licking_abs_times)} active frames.")
+    except Exception as e:
+        print(f"  Warning: Could not determine licking state from raw frames: {e}")
+        if len(lick_times) > 1:
+            LICK_BOUT_ILI = 0.5
+            sorted_licks = np.sort(lick_times)
+            ili = np.diff(sorted_licks)
+            bout_breaks = np.where(ili > LICK_BOUT_ILI)[0]
+            bout_starts = np.concatenate([[0], bout_breaks + 1])
+            bout_ends = np.concatenate([bout_breaks, [len(sorted_licks) - 1]])
+            for bs, be in zip(bout_starts, bout_ends):
+                t_start = sorted_licks[bs]
+                t_end = sorted_licks[be]
+                bin_start = max(0, int(t_start / bin_size_sec))
+                bin_end = min(n_bins, int(t_end / bin_size_sec) + 1)
+                state_labels[bin_start:bin_end] = 'Licking'
+
+    # --- 3. Dimensionality Reduction (on ALL bins — no velocity filtering for manifold) ---
+    print(f"  Applying {method.upper()} reduction to {n_components} dimensions...")
+
+    if method == 'pca':
+        reducer = PCA(n_components=n_components)
+        embedding = reducer.fit_transform(population_matrix)
+        explained_var = reducer.explained_variance_ratio_
+        print(f"  Explained variance: {explained_var}")
+    elif method == 'tsne':
+        reducer = TSNE(n_components=n_components, random_state=42)
+        embedding = reducer.fit_transform(population_matrix)
+    elif method == 'umap':
+        reducer = umap.UMAP(n_components=n_components, random_state=42)
+        embedding = reducer.fit_transform(population_matrix)
+    else:
+        print(f"  Error: Unknown method '{method}'")
+        return
+
+    # --- 4. Save embedding CSV ---
+    df_embedding = pd.DataFrame(embedding, columns=[f'Dim{i+1}' for i in range(n_components)])
+    df_embedding['time_sec'] = bin_centers[:len(embedding)]
+    df_embedding['state'] = state_labels[:len(embedding)]
+
+    output_dir = paths.neural_base / 'post_analysis'
+    output_dir.mkdir(exist_ok=True)
+    output_path = output_dir / f'population_manifold_{method}.csv'
+    df_embedding.to_csv(output_path, index=False)
+    print(f"  Embedding saved to {output_path}")
+
+    # =====================================================================
+    # Figure 1: 3D Scatter Colored by Behavioral State
+    # =====================================================================
+    try:
+        print("  Generating Figure 1: Behavioral State Scatter...")
+        state_colors = {'Licking': '#FF8C00', 'Moving': '#2E8B57', 'Resting': '#A9A9A9'}
+        fig = plt.figure(figsize=(10, 8))
+        ax = fig.add_subplot(111, projection='3d')
+
+        for state_name, color in state_colors.items():
+            mask = state_labels[:len(embedding)] == state_name
+            if np.any(mask):
+                ax.scatter(embedding[mask, 0], embedding[mask, 1], embedding[mask, 2],
+                           c=color, s=6, alpha=0.5, label=f'{state_name} ({np.sum(mask)})')
+
+        ax.set_xlabel(f'{method.upper()} Dim 1')
+        ax.set_ylabel(f'{method.upper()} Dim 2')
+        ax.set_zlabel(f'{method.upper()} Dim 3')
+        ax.set_title('Population Manifold — Behavioral States', fontsize=14, fontweight='bold')
+        ax.legend(loc='upper left', fontsize=10)
+        plt.tight_layout()
+        fig_path = output_dir / f'population_manifold_{method}_behavioral_states.png'
+        plt.savefig(fig_path, dpi=200)
+        plt.close()
+        print(f"  Saved: {fig_path}")
+    except Exception as e:
+        print(f"  Error generating Figure 1: {e}")
+
+    # =====================================================================
+    # Figure 2: 3D Trajectory Line
+    # =====================================================================
+    try:
+        print("  Generating Figure 2: Trajectory Line...")
+        fig = plt.figure(figsize=(10, 8))
+        ax = fig.add_subplot(111, projection='3d')
+
+        n_pts = len(embedding)
+        colors_time = plt.cm.viridis(np.linspace(0, 1, n_pts))
+
+        for i in range(n_pts - 1):
+            ax.plot(embedding[i:i+2, 0], embedding[i:i+2, 1], embedding[i:i+2, 2],
+                    color=colors_time[i], linewidth=0.5, alpha=0.7)
+
+        ax.scatter(*embedding[0, :3], c='lime', s=80, marker='^', edgecolors='k', zorder=5, label='Start')
+        ax.scatter(*embedding[-1, :3], c='red', s=80, marker='s', edgecolors='k', zorder=5, label='End')
+
+        ax.set_xlabel(f'{method.upper()} Dim 1')
+        ax.set_ylabel(f'{method.upper()} Dim 2')
+        ax.set_zlabel(f'{method.upper()} Dim 3')
+        ax.set_title('Population Trajectory — Entire Session', fontsize=14, fontweight='bold')
+        ax.legend(loc='upper left', fontsize=10)
+
+        sm = plt.cm.ScalarMappable(cmap='viridis', norm=plt.Normalize(0, session_duration))
+        sm.set_array([])
+        cbar = plt.colorbar(sm, ax=ax, shrink=0.6, pad=0.1)
+        cbar.set_label('Time (s)')
+
+        plt.tight_layout()
+        fig_path = output_dir / f'population_manifold_{method}_trajectory.png'
+        plt.savefig(fig_path, dpi=200)
+        plt.close()
+        print(f"  Saved: {fig_path}")
+    except Exception as e:
+        print(f"  Error generating Figure 2: {e}")
+
+    # =====================================================================
+    # Figure 3: Trial-Averaged Trajectory (Movement Onset → Licking at Destination)
+    #   Conditions: Prev Rewarded/Non-rewarded × Current Rewarded/Non-rewarded
+    # =====================================================================
+    try:
+        print("  Generating Figure 3: Trial trajectories (move onset → destination licking)...")
+
+        N_INTERP_BINS = 20  # Normalize all trials to this many time steps
+
+        condition_labels = {
+            (True, True):   'Prev Rew → Curr Rew',
+            (True, False):  'Prev Rew → Curr Non-rew',
+            (False, True):  'Prev Non-rew → Curr Rew',
+            (False, False): 'Prev Non-rew → Curr Non-rew',
+        }
+        condition_colors = {
+            (True, True):   '#1E90FF',   # Blue
+            (True, False):  '#FF6347',   # Tomato
+            (False, True):  '#32CD32',   # Lime green
+            (False, False): '#9370DB',   # Medium purple
+        }
+
+        condition_trajs = {k: [] for k in condition_labels}
+        condition_lick_idx = {k: [] for k in condition_labels}  # Normalized first-lick index
+        trial_count_by_cond = {k: 0 for k in condition_labels}
+
+        if len(corner_times) > 1 and len(lick_times) > 0:
+            sorted_licks = np.sort(lick_times)
+            sorted_corners = np.sort(corner_times)
+
+            # Debug: count rewarded port visits
+            n_rew_visits = 0
+            for ci in range(len(sorted_corners)):
+                pt = sorted_corners[ci]
+                nt = sorted_corners[ci + 1] if ci + 1 < len(sorted_corners) else pt + 10.0
+                if len(reward_times) > 0 and np.any((reward_times >= pt) & (reward_times < nt)):
+                    n_rew_visits += 1
+            print(f"  Reward debug: {n_rew_visits}/{len(sorted_corners)} port visits classified as rewarded ")
+            print(f"  (reward_times has {len(reward_times)} events, range {reward_times.min():.1f}-{reward_times.max():.1f}s)" if len(reward_times) > 0 else "  (no reward_times)")
+
+            for ci in range(1, len(sorted_corners)):
+                current_port_t = sorted_corners[ci]
+                prev_port_t = sorted_corners[ci - 1]
+
+                # Next corner boundary for reward checking
+                next_port_t = sorted_corners[ci + 1] if ci + 1 < len(sorted_corners) else current_port_t + 10.0
+                # Previous corner boundary for reward checking
+                prev_next_boundary = current_port_t
+
+                # Find movement onset between previous and current corner visit
+                if len(movement_onsets) > 0:
+                    onsets_between = movement_onsets[
+                        (movement_onsets > prev_port_t) & (movement_onsets < current_port_t)
+                    ]
+                    if len(onsets_between) == 0:
+                        continue
+                    mo_t = onsets_between[-1]  # Last movement onset before arrival
+                else:
+                    continue
+
+                # Find licks at destination corner (within 2s after corner arrival)
+                licks_at_dest = sorted_licks[
+                    (sorted_licks >= current_port_t) & (sorted_licks < min(current_port_t + 2.0, next_port_t))
+                ]
+                if len(licks_at_dest) == 0:
+                    continue
+
+                first_lick = licks_at_dest[0]
+
+                # Find last lick in the bout (ILI < 0.5s)
+                all_licks_after = sorted_licks[sorted_licks >= first_lick]
+                last_lick = first_lick
+                for li in range(1, len(all_licks_after)):
+                    if all_licks_after[li] - all_licks_after[li - 1] < 0.5:
+                        last_lick = all_licks_after[li]
+                    else:
+                        break
+
+                trial_start = mo_t
+                trial_end = last_lick
+
+                if trial_end - trial_start < 0.2:
+                    continue
+
+                # Current corner rewarded?
+                current_rew = bool(np.any(
+                    (reward_times >= current_port_t) & (reward_times < next_port_t)
+                )) if len(reward_times) > 0 else False
+
+                # Previous corner rewarded?
+                prev_rew = bool(np.any(
+                    (reward_times >= prev_port_t) & (reward_times < prev_next_boundary)
+                )) if len(reward_times) > 0 else False
+
+                # Extract population activity for this trial and project
+                start_bin = int(trial_start / bin_size_sec)
+                end_bin = int(trial_end / bin_size_sec) + 1
+                if start_bin < 0 or end_bin > len(population_matrix) or end_bin - start_bin < 2:
+                    continue
+
+                snippet = population_matrix[start_bin:end_bin, :]
+
+                if method == 'pca' and hasattr(reducer, 'transform'):
+                    snippet_emb = reducer.transform(snippet)
+                else:
+                    snippet_emb = snippet[:, :n_components]
+
+                # Time-normalize to N_INTERP_BINS via linear interpolation
+                n_raw = snippet_emb.shape[0]
+                x_raw = np.linspace(0, 1, n_raw)
+                x_interp = np.linspace(0, 1, N_INTERP_BINS)
+                snippet_norm = np.zeros((N_INTERP_BINS, n_components))
+                for dim in range(n_components):
+                    snippet_norm[:, dim] = np.interp(x_interp, x_raw, snippet_emb[:, dim])
+
+                cond_key = (prev_rew, current_rew)
+                condition_trajs[cond_key].append(snippet_norm)
+                trial_count_by_cond[cond_key] += 1
+
+                # Store normalized first-lick position (fraction of trial duration)
+                lick_frac = (first_lick - trial_start) / (trial_end - trial_start)
+                lick_bin_idx = int(lick_frac * (N_INTERP_BINS - 1))
+                lick_bin_idx = max(0, min(N_INTERP_BINS - 1, lick_bin_idx))
+                condition_lick_idx[cond_key].append(lick_bin_idx)
+
+        # Print trial counts
+        total_trials = sum(trial_count_by_cond.values())
+        print(f"  Total trials identified: {total_trials}")
+        for k, label in condition_labels.items():
+            print(f"    {label}: n={trial_count_by_cond[k]}")
+
+        # Plot
+        fig = plt.figure(figsize=(12, 9))
+        ax = fig.add_subplot(111, projection='3d')
+        plotted = False
+
+        for cond_key in condition_labels:
+            arr = condition_trajs[cond_key]
+            if len(arr) < 2:
+                continue
+            arr = np.array(arr)
+            mean_traj = np.mean(arr, axis=0)
+            label = f'{condition_labels[cond_key]} (n={len(arr)})'
+            color = condition_colors[cond_key]
+
+            # Plot individual trials (thin, transparent)
+            for trial_traj in arr:
+                ax.plot(trial_traj[:, 0], trial_traj[:, 1], trial_traj[:, 2],
+                        color=color, linewidth=0.4, alpha=0.3)
+
+            # Plot mean trajectory (thick)
+            ax.plot(mean_traj[:, 0], mean_traj[:, 1], mean_traj[:, 2],
+                    color=color, linewidth=2.5, label=label)
+
+            # Start marker (movement onset)
+            ax.scatter(mean_traj[0, 0], mean_traj[0, 1], mean_traj[0, 2],
+                       c=color, s=80, marker='^', edgecolors='k', linewidths=1, zorder=5)
+            # End marker (last lick)
+            ax.scatter(mean_traj[-1, 0], mean_traj[-1, 1], mean_traj[-1, 2],
+                       c=color, s=80, marker='s', edgecolors='k', linewidths=1, zorder=5)
+
+            # First-lick marker (circle) — average position across trials
+            lick_indices = condition_lick_idx[cond_key]
+            if lick_indices:
+                mean_lick_idx = int(np.round(np.mean(lick_indices)))
+                mean_lick_idx = max(0, min(len(mean_traj) - 1, mean_lick_idx))
+                ax.scatter(mean_traj[mean_lick_idx, 0], mean_traj[mean_lick_idx, 1], mean_traj[mean_lick_idx, 2],
+                           c=color, s=80, marker='o', edgecolors='k', linewidths=1, zorder=6)
+
+            plotted = True
+
+        if plotted:
+            ax.set_xlabel(f'{method.upper()} Dim 1')
+            ax.set_ylabel(f'{method.upper()} Dim 2')
+            ax.set_zlabel(f'{method.upper()} Dim 3')
+            ax.set_title('Trial-Averaged Trajectory (Move Onset → Last Lick)\n'
+                         '(△=Move Onset, ●=First Lick, □=Last Lick)',
+                         fontsize=13, fontweight='bold')
+            ax.legend(loc='upper left', fontsize=9)
+            plt.tight_layout()
+            fig_path = output_dir / f'population_manifold_{method}_trial_trajectories.png'
+            plt.savefig(fig_path, dpi=200)
+            plt.close()
+            print(f"  Saved: {fig_path}")
+        else:
+            plt.close()
+            print("  Skipping Figure 3: not enough trials in any condition.")
+
+    except Exception as e:
+        print(f"  Error generating Figure 3: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+    print("  Population manifold analysis complete.")
+
+
+def analyze_population_trajectories_by_direction(paths: DataPaths, method: str = 'pca', n_components: int = 3, 
+                                                 corner_order: list = [1, 2, 4, 3], min_trials: int = 5,
+                                                 max_plot_trials: int = 10, time_bin_ms: int = 100,
+                                                 smooth_sigma: int = 3):
+    """
+    Analyzes population trajectories separately for CW and CCW movements.
+
+    Trial window: corner onset → last lick at destination port.
+    Trajectories are time-normalized and plotted in 3D with event markers
+    (△=Move Onset, ●=First Lick, □=Last Lick).
+
+    Args:
+        paths (DataPaths): The DataPaths object with all the required paths.
+        method (str): Dimensionality reduction method ('pca', 'tsne', or 'umap').
+        n_components (int): Number of dimensions to reduce to (>=3 for 3D plots).
+        corner_order (list): Order of corners for CW navigation.
+        min_trials (int): Minimum number of trials per direction required.
+        max_plot_trials (int): Maximum number of individual trials to plot.
+        time_bin_ms (int): Time bin size in milliseconds for population activity.
+        smooth_sigma (int): Gaussian smoothing sigma in units of time bins.
+    """
+    print(f"Analyzing population trajectories by direction ({method.upper()})...")
+
+    try:
+        from sklearn.decomposition import PCA
+        if method == 'tsne':
+            from sklearn.manifold import TSNE
+        elif method == 'umap':
+            import umap
+    except ImportError as e:
+        print(f"  Error: Required library not found - {e}")
+        return
+
+    if n_components < 3:
+        print("  Warning: n_components increased to 3 for 3D plotting.")
+        n_components = 3
+
+    # --- 1. Load Behavioral Data (Corner Events) ---
+    if not paths.event_corner or not paths.event_corner.exists():
+        print("  Error: Corner event file not found.")
+        return
+
+    try:
+        base_path = paths.base_path
+        event_loader = EventDataLoader(base_path)
+        dlc_loader = DLCDataLoader(base_path)
+        df_dlc = dlc_loader.load(paths.dlc_h5)
+
+        corner_df_raw = event_loader.load(paths.event_corner, sync_to_dlc=True, dlc_data=df_dlc)
+        corner_df_onsets = event_loader.detect_onsets(corner_df_raw)
+        corner_ids = event_loader.infer_port_id(corner_df_onsets).values
+        corner_times = event_loader.get_event_times(corner_df_onsets, strobe_path=paths.strobe_seconds)
+
+        valid_mask = corner_ids != 0
+        corner_ids = corner_ids[valid_mask]
+        corner_times = corner_times[valid_mask]
+
+        print(f"  Loaded {len(corner_times)} valid corner events.")
+
+    except Exception as e:
+        print(f"  Error loading corner event data: {e}")
+        return
+
+    # --- 1b. Load Lick Events ---
+    lick_times = np.array([])
+    try:
+        lick_times = event_loader.get_event_times_by_type('licking', paths, dlc_loader=dlc_loader)
+        print(f"  Loaded {len(lick_times)} lick events.")
+    except Exception as e:
+        print(f"  Warning: Could not load lick events: {e}")
+
+    if len(lick_times) == 0:
+        print("  Error: Lick times are required to define trial windows. Aborting.")
+        return
+
+    sorted_licks = np.sort(lick_times)
+
+    # --- 2. Load Spike Data & Build Session Population Matrix ---
+    try:
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
+        return
+
+    session_duration = spike_times_sec.max()
+    bin_size_sec = time_bin_ms / 1000.0
+    n_bins = int(np.ceil(session_duration / bin_size_sec))
+
+    print(f"  Binning activity into {n_bins} bins of {time_bin_ms}ms...")
+
+    population_matrix = np.zeros((n_bins, len(unique_clusters)))
+    for i, cid in enumerate(unique_clusters):
+        cluster_spikes = spike_times_sec[spike_clusters == cid]
+        hist, _ = np.histogram(cluster_spikes, bins=n_bins, range=(0, session_duration))
+        population_matrix[:, i] = hist / bin_size_sec
+
+    if smooth_sigma > 0:
+        print(f"  Applying Gaussian smoothing (sigma={smooth_sigma} bins = {smooth_sigma * bin_size_sec * 1000:.0f}ms)...")
+        population_matrix = gaussian_filter1d(population_matrix, sigma=smooth_sigma, axis=0)
+
+    # --- 3. Fit Dimensionality Reduction on Full Session ---
+    print(f"  Fitting {method.upper()} on full session ({n_bins} bins x {len(unique_clusters)} neurons)...")
+
+    if method == 'pca':
+        reducer = PCA(n_components=n_components)
+        reducer.fit(population_matrix)
+        print(f"  Explained variance: {reducer.explained_variance_ratio_}")
+    elif method == 'tsne':
+        print("  Warning: t-SNE cannot transform new data; falling back to PCA for trial projection.")
+        reducer = PCA(n_components=n_components)
+        reducer.fit(population_matrix)
+    elif method == 'umap':
+        reducer = umap.UMAP(n_components=n_components, random_state=42)
+        reducer.fit(population_matrix)
+
+    # --- 4. Identify CW/CCW movements and extract trial windows (onset → last lick) ---
+    N_INTERP_BINS = 20
+
+    cw_trajs = []
+    ccw_trajs = []
+    cw_first_lick_idx = []
+    ccw_first_lick_idx = []
+
+    for i in range(len(corner_times) - 1):
+        start_port = corner_ids[i]
+        end_port = corner_ids[i + 1]
+        onset_time = corner_times[i]       # departure from port i
+        arrival_time = corner_times[i + 1] # arrival at port i+1
+
+        if start_port == end_port or arrival_time <= onset_time:
+            continue
+
+        # Determine CW or CCW
+        try:
+            si = corner_order.index(start_port)
+            ei = corner_order.index(end_port)
+        except ValueError:
+            continue
+
+        is_cw = (si + 1) % len(corner_order) == ei
+        is_ccw = (si - 1 + len(corner_order)) % len(corner_order) == ei
+        if not is_cw and not is_ccw:
+            continue
+
+        # Find licks at destination (within 2s after arrival, before next corner)
+        next_boundary = corner_times[i + 2] if i + 2 < len(corner_times) else arrival_time + 10.0
+        licks_at_dest = sorted_licks[
+            (sorted_licks >= arrival_time) & (sorted_licks < min(arrival_time + 2.0, next_boundary))
+        ]
+        if len(licks_at_dest) == 0:
+            continue
+
+        first_lick = licks_at_dest[0]
+
+        # Find last lick in the bout (ILI < 0.5s)
+        all_licks_after = sorted_licks[sorted_licks >= first_lick]
+        last_lick = first_lick
+        for li in range(1, len(all_licks_after)):
+            if all_licks_after[li] - all_licks_after[li - 1] < 0.5:
+                last_lick = all_licks_after[li]
+            else:
+                break
+
+        trial_start = onset_time
+        trial_end = last_lick
+
+        if trial_end - trial_start < 0.2:
+            continue
+
+        # Extract population activity for this trial and project
+        start_bin = int(trial_start / bin_size_sec)
+        end_bin = int(trial_end / bin_size_sec) + 1
+        if start_bin < 0 or end_bin > len(population_matrix) or end_bin - start_bin < 2:
+            continue
+
+        snippet = population_matrix[start_bin:end_bin, :]
+
+        if hasattr(reducer, 'transform'):
+            snippet_emb = reducer.transform(snippet)
+        else:
+            snippet_emb = snippet[:, :n_components]
+
+        # Time-normalize to N_INTERP_BINS
+        n_raw = snippet_emb.shape[0]
+        x_raw = np.linspace(0, 1, n_raw)
+        x_interp = np.linspace(0, 1, N_INTERP_BINS)
+        snippet_norm = np.zeros((N_INTERP_BINS, n_components))
+        for dim in range(n_components):
+            snippet_norm[:, dim] = np.interp(x_interp, x_raw, snippet_emb[:, dim])
+
+        # Compute normalized first-lick position
+        lick_frac = (first_lick - trial_start) / (trial_end - trial_start)
+        lick_bin_idx = int(lick_frac * (N_INTERP_BINS - 1))
+        lick_bin_idx = max(0, min(N_INTERP_BINS - 1, lick_bin_idx))
+
+        if is_cw:
+            cw_trajs.append(snippet_norm)
+            cw_first_lick_idx.append(lick_bin_idx)
+        else:
+            ccw_trajs.append(snippet_norm)
+            ccw_first_lick_idx.append(lick_bin_idx)
+
+    print(f"  Valid trials with licking: CW={len(cw_trajs)}, CCW={len(ccw_trajs)}")
+
+    if len(cw_trajs) < min_trials or len(ccw_trajs) < min_trials:
+        print(f"  Not enough trials in both directions (min {min_trials} required). Aborting.")
+        return
+
+    cw_trajs = np.array(cw_trajs)
+    ccw_trajs = np.array(ccw_trajs)
+
+    # --- 5. Compute Mean Trajectories & Distance ---
+    cw_mean_traj = np.mean(cw_trajs, axis=0)
+    ccw_mean_traj = np.mean(ccw_trajs, axis=0)
+
+    traj_distance = np.linalg.norm(cw_mean_traj - ccw_mean_traj, axis=1)
+    mean_traj_distance = np.mean(traj_distance)
+
+    cw_mean_lick_idx = int(np.round(np.mean(cw_first_lick_idx)))
+    ccw_mean_lick_idx = int(np.round(np.mean(ccw_first_lick_idx)))
+    cw_mean_lick_idx = max(0, min(N_INTERP_BINS - 1, cw_mean_lick_idx))
+    ccw_mean_lick_idx = max(0, min(N_INTERP_BINS - 1, ccw_mean_lick_idx))
+
+    print(f"  Mean trajectory distance between CW and CCW: {mean_traj_distance:.4f}")
+
+    # --- 6. Save Results ---
+    output_dir = paths.neural_base / 'post_analysis'
+    output_dir.mkdir(exist_ok=True)
+
+    cw_flat = cw_trajs.reshape(-1, n_components)
+    ccw_flat = ccw_trajs.reshape(-1, n_components)
+
+    df_cw = pd.DataFrame(cw_flat, columns=[f'Dim{i+1}' for i in range(n_components)])
+    df_cw['direction'] = 'CW'
+    df_cw['trial'] = np.repeat(np.arange(cw_trajs.shape[0]), N_INTERP_BINS)
+    df_cw['time_in_trial'] = np.tile(np.arange(N_INTERP_BINS), cw_trajs.shape[0])
+
+    df_ccw = pd.DataFrame(ccw_flat, columns=[f'Dim{i+1}' for i in range(n_components)])
+    df_ccw['direction'] = 'CCW'
+    df_ccw['trial'] = np.repeat(np.arange(ccw_trajs.shape[0]), N_INTERP_BINS)
+    df_ccw['time_in_trial'] = np.tile(np.arange(N_INTERP_BINS), ccw_trajs.shape[0])
+
+    df_combined = pd.concat([df_cw, df_ccw], ignore_index=True)
+
+    output_path = output_dir / f'population_trajectories_by_direction_{method}.csv'
+    df_combined.to_csv(output_path, index=False)
+    print(f"  Trajectories saved to {output_path}")
+
+    summary = {
+        'method': method,
+        'n_components': n_components,
+        'n_cw_trials': len(cw_trajs),
+        'n_ccw_trials': len(ccw_trajs),
+        'mean_trajectory_distance': mean_traj_distance
+    }
+    summary_df = pd.DataFrame([summary])
+    summary_path = output_dir / f'population_trajectories_summary_{method}.csv'
+    summary_df.to_csv(summary_path, index=False)
+
+    # --- 7. Visualize Trajectories (3D with event markers) ---
+    try:
+        fig = plt.figure(figsize=(18, 6))
+
+        # --- Panel 1: 3D Mean Trajectories with event markers ---
+        ax1 = fig.add_subplot(131, projection='3d')
+
+        for trajs_arr, mean_traj, mean_lick, color, label in [
+            (cw_trajs, cw_mean_traj, cw_mean_lick_idx, '#1E90FF', 'CW'),
+            (ccw_trajs, ccw_mean_traj, ccw_mean_lick_idx, '#FF6347', 'CCW'),
+        ]:
+            ax1.plot(mean_traj[:, 0], mean_traj[:, 1], mean_traj[:, 2],
+                    color=color, linewidth=2.5, label=f'{label} mean (n={len(trajs_arr)})')
+
+            # △ = Move Onset (start)
+            ax1.scatter(mean_traj[0, 0], mean_traj[0, 1], mean_traj[0, 2],
+                       c=color, s=80, marker='^', edgecolors='k', linewidths=1, zorder=5)
+            # ● = First Lick
+            ax1.scatter(mean_traj[mean_lick, 0], mean_traj[mean_lick, 1], mean_traj[mean_lick, 2],
+                       c=color, s=80, marker='o', edgecolors='k', linewidths=1, zorder=6)
+            # □ = Last Lick (end)
+            ax1.scatter(mean_traj[-1, 0], mean_traj[-1, 1], mean_traj[-1, 2],
+                       c=color, s=80, marker='s', edgecolors='k', linewidths=1, zorder=5)
+
+        ax1.set_xlabel(f'{method.upper()} Dim 1')
+        ax1.set_ylabel(f'{method.upper()} Dim 2')
+        ax1.set_zlabel(f'{method.upper()} Dim 3')
+        ax1.set_title('Mean Trajectories\n(△=Onset, ●=First Lick, □=Last Lick)',
+                      fontsize=11, fontweight='bold')
+        ax1.legend(loc='upper left', fontsize=8)
+
+        # --- Panel 2: 3D Individual Trials ---
+        ax2 = fig.add_subplot(132, projection='3d')
+
+        for trajs_arr, color, label in [
+            (cw_trajs, '#1E90FF', 'CW'),
+            (ccw_trajs, '#FF6347', 'CCW'),
+        ]:
+            for j in range(min(max_plot_trials, len(trajs_arr))):
+                ax2.plot(trajs_arr[j, :, 0], trajs_arr[j, :, 1], trajs_arr[j, :, 2],
+                        color=color, linewidth=0.5, alpha=0.4)
+
+        ax2.set_xlabel(f'{method.upper()} Dim 1')
+        ax2.set_ylabel(f'{method.upper()} Dim 2')
+        ax2.set_zlabel(f'{method.upper()} Dim 3')
+        ax2.set_title('Individual Trial Trajectories', fontsize=11, fontweight='bold')
+        ax2.grid(True, alpha=0.3)
+
+        # --- Panel 3: Trajectory distance over normalized time ---
+        ax3 = fig.add_subplot(133)
+        normalized_time = np.linspace(0, 1, N_INTERP_BINS)
+        ax3.plot(normalized_time, traj_distance, 'k-', linewidth=2)
+        ax3.set_xlabel('Normalized Trial Time (Onset → Last Lick)')
+        ax3.set_ylabel('Trajectory Distance (Euclidean)')
+        ax3.set_title('CW vs CCW Trajectory Separation')
+        ax3.axhline(mean_traj_distance, color='gray', linestyle='--', 
+                   label=f'Mean: {mean_traj_distance:.3f}')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plot_path = output_dir / f'population_trajectories_by_direction_{method}.png'
+        plt.savefig(plot_path, dpi=200)
+        plt.close()
+        print(f"  Trajectory plot saved to {plot_path}")
+
+    except Exception as e:
+        print(f"  Could not generate trajectory plot: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def analyze_phase_space_trajectories(paths: DataPaths, n_components: int = 3,
+                                     time_bin_ms: int = 50, smooth_sigma: int = 2):
+    """
+    Analyzes phase space trajectories of population activity.
+
+    Projects population activity into low-dimensional phase space (via PCA)
+    and identifies fixed points (slow regions), attractor states, and
+    dynamical features of the neural population.
+
+    Phase space: each axis = one PC of population activity. The trajectory
+    shows how the population state evolves over the entire session.
+    Fixed points = regions where the trajectory velocity is low, suggesting
+    stable attractor states (e.g., resting at a port).
+
+    Args:
+        paths (DataPaths): The DataPaths object with all the required paths.
+        n_components (int): Number of dimensions for phase space.
+        time_bin_ms (int): Time bin size in milliseconds.
+        smooth_sigma (int): Gaussian smoothing sigma in units of time bins.
+    """
+    print("Analyzing phase space trajectories...")
+
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
+    # --- 1. Load Spike Data ---
+    try:
+        base_path = paths.neural_base_path if paths.neural_base_path else paths.base_path
+        spike_loader = SpikeDataLoader(base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
+        return
+
+    session_duration = spike_times_sec.max()
+    bin_size_sec = time_bin_ms / 1000.0
+    n_bins = int(session_duration / bin_size_sec)
+
+    # --- 2. Create Population Firing Rate Matrix ---
+    print(f"  Creating population activity matrix ({n_bins} bins x {len(unique_clusters)} neurons)...")
+
+    population_matrix = []
+    for cid in tqdm(unique_clusters, desc="Processing neurons"):
+        cluster_spikes = spike_times_sec[spike_clusters == cid]
+
+        if len(cluster_spikes) < 50:
+            continue
+
+        spike_train, _ = np.histogram(cluster_spikes, bins=n_bins, range=(0, session_duration))
+        firing_rate = spike_train / bin_size_sec
+
+        if smooth_sigma > 0:
+            firing_rate = gaussian_filter1d(firing_rate, sigma=smooth_sigma)
+
+        population_matrix.append(firing_rate)
+
+    population_matrix = np.array(population_matrix)  # neurons x time
+    print(f"  Population matrix shape: {population_matrix.shape}")
+
+    # --- 3. Dimensionality Reduction to Phase Space ---
+    scaler = StandardScaler()
+    population_normalized = scaler.fit_transform(population_matrix.T).T
+
+    pca = PCA(n_components=n_components)
+    phase_space = pca.fit_transform(population_normalized.T)  # time x components
+
+    print(f"  Explained variance: {pca.explained_variance_ratio_}")
+    print(f"  Total variance explained: {np.sum(pca.explained_variance_ratio_):.1%}")
+
+    # --- 4. Identify Fixed Points ---
+    velocity = np.diff(phase_space, axis=0)
+    speed = np.linalg.norm(velocity, axis=1)
+
+    speed_threshold = np.percentile(speed, 10)
+    fixed_point_candidates = np.where(speed < speed_threshold)[0]
+
+    print(f"  Identified {len(fixed_point_candidates)} potential fixed points.")
+
+    n_fixed_points = 0
+    if len(fixed_point_candidates) > 10:
+        from sklearn.cluster import DBSCAN
+
+        fixed_points_coords = phase_space[fixed_point_candidates]
+        clustering = DBSCAN(eps=0.5, min_samples=5).fit(fixed_points_coords)
+        n_fixed_points = len(set(clustering.labels_)) - (1 if -1 in clustering.labels_ else 0)
+
+        print(f"  Found {n_fixed_points} stable fixed point regions.")
+
+    # --- 5. Integrate Behavioral Data (VAME and Port IDs) ---
+    df_phase_space = pd.DataFrame(phase_space, columns=[f'PC{i+1}' for i in range(n_components)])
+    df_phase_space['time_sec'] = np.arange(len(phase_space)) * bin_size_sec
+    df_phase_space['speed'] = np.concatenate([[0], speed])
+    df_phase_space['vame_motif'] = -1  # Placeholder
+    df_phase_space['port_id'] = 0     # Placeholder (0=unknown/none)
+
+    # 5.1 Load VAME labels
+    if paths.vame_dir and paths.vame_dir.exists():
+        try:
+            vame_loader = VAMEDataLoader(paths.base_path)
+            vame_data = vame_loader.load(paths.vame_dir)
+            vame_labels = vame_data['labels']
+            
+            # Map VAME labels (60fps) to neural bins (50ms = 20fps)
+            resampled_motifs = []
+            frames_per_bin = bin_size_sec * 60  # e.g., 0.050 * 60 = 3 frames
+            
+            for i in range(n_bins):
+                start_frame = int(i * frames_per_bin)
+                end_frame = int((i + 1) * frames_per_bin)
+                bin_labels = vame_labels[start_frame:end_frame]
+                if len(bin_labels) > 0:
+                    counts = np.bincount(bin_labels.astype(int))
+                    resampled_motifs.append(np.argmax(counts))
+                else:
+                    resampled_motifs.append(-1)
+            
+            resampled_motifs = np.array(resampled_motifs[:len(df_phase_space)])
+            df_phase_space['vame_motif'] = resampled_motifs
+            print(f"  Integrated VAME labels: {len(resampled_motifs)} bins")
+        except Exception as e:
+            print(f"  Warning: Could not integrate VAME labels: {e}")
+
+    # 5.2 Load Port ID data (Gating)
+    if paths.event_corner and paths.event_corner.exists():
+        try:
+            event_loader = EventDataLoader(paths.base_path)
+            # Load without reindexing first to get raw data
+            event_df = event_loader.load(paths.event_corner, sync_to_dlc=False)
+            port_series = event_loader.infer_port_id(event_df)
+            
+            # Map Port ID to neural time bins via strobe times
+            if paths.strobe_seconds and paths.strobe_seconds.exists():
+                strobe_times = np.load(paths.strobe_seconds).flatten()
+                event_times = strobe_times[event_df.index]
+                
+                # Resample port IDs to neural bins
+                neural_bin_times = df_phase_space['time_sec'].values
+                resampled_ports = np.zeros(len(neural_bin_times), dtype=int)
+                
+                # For each event, mark the following frames until next event or fixed window
+                # Simple version: find closest event for each time bin
+                from scipy.interpolate import interp1d
+                # We use nearest neighbor interpolation to propagate port IDs
+                f_port = interp1d(event_times, port_series.values, kind='nearest', 
+                                 bounds_error=False, fill_value=0)
+                resampled_ports = f_port(neural_bin_times).astype(int)
+                
+                # Clean up: only keep port ID if the animal is actually 'at' the corner (approx)
+                # We'll leave it as-is for now to show the global attractor gating
+                
+                df_phase_space['port_id'] = resampled_ports
+                print(f"  Integrated Port ID labels: {len(resampled_ports)} bins")
+        except Exception as e:
+            print(f"  Warning: Could not integrate Port ID labels: {e}")
+
+    # --- 6. Meta-stable Clustering (Higher-D PCA for Clustering) ---
+    print( "  Performing High-D clustering for meta-stable states...")
+    # Re-run PCA with more components for clustering purposes
+    n_clus_pc = min(10, len(unique_clusters))
+    pca_hd = PCA(n_components=n_clus_pc)
+    phase_space_hd = pca_hd.fit_transform(population_normalized.T)
+    
+    # Run DBSCAN on the HD space (better separation)
+    if len(fixed_point_candidates) > 10:
+        from sklearn.cluster import DBSCAN
+        fixed_coords_hd = phase_space_hd[fixed_point_candidates]
+        # Tuning EPS for HD space
+        # eps=1.0 is often better for 10D space to capture smaller metastabilities
+        clustering = DBSCAN(eps=1.0, min_samples=10).fit(fixed_coords_hd)
+        n_stable_states = len(set(clustering.labels_)) - (1 if -1 in clustering.labels_ else 0)
+        print(f"  Identified {n_stable_states} meta-stable attractor states in {n_clus_pc}D space.")
+    else:
+        n_stable_states = 0
+
+    # --- 7. Attractor Characterization (Port + Motif) ---
+    if n_stable_states > 0:
+        print("\n  Meta-stable Attractor Characterization:")
+        header = f"  {'State':<8} | {'Size':<6} | {'Port':<6} | {'Dominant Motif':<18} | {'Motif %':<8}"
+        print(header)
+        print("-" * len(header))
+        
+        for cluster_id in range(n_stable_states):
+            mask = clustering.labels_ == cluster_id
+            indices = fixed_point_candidates[mask]
+            
+            # Port purity
+            cluster_ports = df_phase_space.loc[indices, 'port_id']
+            valid_ports = cluster_ports[cluster_ports > 0]
+            dom_port = np.argmax(np.bincount(valid_ports)) if len(valid_ports) > 0 else "N/A"
+            
+            # Motif purity
+            cluster_motifs = df_phase_space.loc[indices, 'vame_motif']
+            valid_motifs = cluster_motifs[cluster_motifs >= 0].astype(int)
+            if len(valid_motifs) > 0:
+                m_counts = np.bincount(valid_motifs)
+                dom_motif = np.argmax(m_counts)
+                m_perc = (m_counts[dom_motif] / len(valid_motifs)) * 100
+            else:
+                dom_motif = "N/A"
+                m_perc = 0
+                
+            print(f"  {cluster_id:<8} | {len(indices):<6} | {dom_port:<6} | Motif {dom_motif:<14} | {m_perc:>6.1f}%")
+        print("-" * len(header))
+
+    # --- 8. Save and Visualize ---
+    output_dir = paths.neural_base / 'post_analysis'
+    output_dir.mkdir(exist_ok=True)
+    df_phase_space.to_csv(output_dir / 'phase_space_trajectories.csv', index=False)
+    
+    # Ensure all vectors used for plotting have same length as df_phase_space
+    full_speed = df_phase_space['speed'].values
+    
+    try:
+        fig = plt.figure(figsize=(20, 15))
+        
+        # 1. 3D Time
+        ax1 = fig.add_subplot(3, 2, 1, projection='3d')
+        sc1 = ax1.scatter(phase_space[:, 0], phase_space[:, 1], phase_space[:, 2], 
+                         c=np.arange(len(phase_space)), cmap='viridis', s=1, alpha=0.2)
+        ax1.set_title("3D Trajectory (Color: Time)")
+        plt.colorbar(sc1, ax=ax1, label='Time')
+        
+        # 2. 3D Port ID (The Meta-stable gating)
+        ax2 = fig.add_subplot(3, 2, 2, projection='3d')
+        port_mask = df_phase_space['port_id'] > 0
+        if port_mask.any():
+            sc2 = ax2.scatter(phase_space[port_mask, 0], phase_space[port_mask, 1], phase_space[port_mask, 2], 
+                             c=df_phase_space.loc[port_mask, 'port_id'], cmap='Set1', s=3, alpha=0.6)
+            plt.colorbar(sc2, ax=ax2, label='Port ID', ticks=[1,2,3,4])
+        else:
+            ax2.text(0.5, 0.5, 0.5, "No Port Data Found", transform=ax2.transAxes)
+        ax2.set_title("Fixed Points gated by Port ID")
+        
+        # 3. 3D VAME Motifs
+        ax3 = fig.add_subplot(3, 2, 3, projection='3d')
+        motif_mask = df_phase_space['vame_motif'] >= 0
+        if motif_mask.any():
+            sc3 = ax3.scatter(phase_space[motif_mask, 0], phase_space[motif_mask, 1], phase_space[motif_mask, 2], 
+                             c=df_phase_space.loc[motif_mask, 'vame_motif'], cmap='tab10', s=2, alpha=0.4)
+            plt.colorbar(sc3, ax=ax3, label='Motif ID')
+        ax3.set_title("Phase Space by VAME Motif")
+        
+        # 4. Velocity over time
+        ax4 = fig.add_subplot(3, 2, 4)
+        ax4.plot(df_phase_space['time_sec'], full_speed, color='gray', alpha=0.5, linewidth=0.5)
+        ax4.fill_between(df_phase_space['time_sec'], full_speed, alpha=0.3, color='blue')
+        ax4.axhline(speed_threshold, color='red', linestyle='--', label='Slow threshold')
+        ax4.set_title("Trajectory Velocity (Dynamics)")
+        ax4.set_xlabel("Time (s)")
+        ax4.legend()
+        
+        # 5. Speed by Motif (Boxplot)
+        ax5 = fig.add_subplot(3, 2, 5)
+        if motif_mask.any():
+            sns.boxplot(data=df_phase_space[motif_mask], x='vame_motif', y='speed', palette='tab10', ax=ax5)
+            ax5.set_title("State Stability by Behavioral Motif")
+        
+        # 6. Motif dominance in Fixed Points (Attractors)
+        ax6 = fig.add_subplot(3, 2, 6)
+        if len(fixed_point_candidates) > 0:
+            fixed_motifs = df_phase_space.loc[fixed_point_candidates, 'vame_motif']
+            idx, counts = np.unique(fixed_motifs[fixed_motifs >= 0].astype(int), return_counts=True)
+            if len(idx) > 0:
+                ax6.bar(idx, counts, color='teal')
+                ax6.set_xticks(idx)
+                ax6.set_title("Frequency of Motifs in Attractor States")
+        
+        plt.tight_layout()
+        plot_path = output_dir / 'phase_space_dynamics_refined.png'
+        plt.savefig(plot_path, dpi=150)
+        plt.close()
+        print(f"  Refined dynamics plots saved to {plot_path}")
+        
+    except Exception as e:
+        print(f"  Visualization failed: {e}")
+        import traceback; traceback.print_exc()
+
+    return df_phase_space
+
+def analyze_ica_decomposition(paths: DataPaths, n_components: int = 10, time_bin_ms: int = 100):
+    """
+    Performs Independent Component Analysis (ICA) on population activity and 
+    correlates components with behavior, LFP power, and dopamine.
+    
+    Args:
+        paths (DataPaths): The DataPaths object with all the required paths.
+        n_components (int): Number of independent components to extract.
+        time_bin_ms (int): Bin size for analysis (ms).
+    """
+    print(f"Performing enhanced ICA decomposition ({n_components} components)...")
+    
+    output_dir = paths.neural_base / 'post_analysis'
+    output_dir.mkdir(exist_ok=True)
+    
+    # --- 1. Load Spike Data ---
+    try:
+        spike_loader = SpikeDataLoader(paths.neural_base_path if hasattr(paths, "neural_base_path") else paths.base_path)
+        spike_data = spike_loader.load(paths.kilosort_dir)
+        
+        spike_times_sec = spike_data['spike_times_sec']
+        spike_clusters = spike_data['spike_clusters']
+        unique_clusters = spike_data['unique_clusters']
+        unit_types = spike_data['unit_types']
+        
+    except Exception as e:
+        print(f"  Error loading spike data: {e}")
+        return
+    
+    if len(unique_clusters) == 0:
+        print("  No units found for ICA.")
+        return
+
+    session_duration = spike_times_sec.max()
+    bin_size_sec = time_bin_ms / 1000.0
+    n_bins = int(session_duration / bin_size_sec)
+    bin_edges = np.arange(n_bins + 1) * bin_size_sec
+    bin_centers = bin_edges[:-1] + bin_size_sec / 2
+    
+    # --- 2. Create Population Matrix ---
+    print(f"  Creating population matrix for {len(unique_clusters)} neurons...")
+    
+    population_matrix = []
+    active_clusters = []
+    for cid in tqdm(unique_clusters, desc="Processing neurons"):
+        cluster_spikes = spike_times_sec[spike_clusters == cid]
+        
+        if len(cluster_spikes) < 50:
+            continue
+        
+        spike_train, _ = np.histogram(cluster_spikes, bins=n_bins, range=(0, session_duration))
+        firing_rate = spike_train / bin_size_sec
+        
+        population_matrix.append(firing_rate)
+        active_clusters.append(cid)
+    
+    if not population_matrix:
+        print("  No neurons with sufficient spikes for ICA.")
+        return
+
+    population_matrix = np.array(population_matrix)  # neurons x time
+    active_clusters = np.array(active_clusters)
+    
+    # Standardize
+    scaler = StandardScaler()
+    population_standardized = scaler.fit_transform(population_matrix.T)  # time x neurons
+    
+    # --- 3. Apply ICA ---
+    print(f"  Applying FastICA...")
+    ica = FastICA(n_components=n_components, random_state=42, max_iter=1000)
+    components = ica.fit_transform(population_standardized)  # time x components
+    mixing_matrix = ica.mixing_  # neurons x components (active_clusters x n_components)
+    
+    # --- 4. Load Auxiliary Signals for Correlation ---
+    print("  Loading auxiliary signals for correlation...")
+    aux_signals = pd.DataFrame(index=range(n_bins))
+    aux_signals['time_sec'] = bin_centers
+
+    # 4.1 LFP Power (Beta & Gamma)
+    if paths.lfp_dir and paths.lfp_dir.exists():
+        try:
+            lfp_loader = LFPDataLoader(paths.lfp_dir, paths.kilosort_dir)
+            # Pick a middle-ish channel
+            chan_ids = lfp_loader.extractor.get_channel_ids() if lfp_loader.extractor else []
+            if len(chan_ids) > 0:
+                chan_id = chan_ids[len(chan_ids)//2]
+                traces, ts = lfp_loader.get_data(start_time=0, end_time=session_duration, channels=[chan_id])
+                if len(traces) > 0:
+                    lfp_trace = traces.flatten()
+                    
+                    for band_name, (low, high) in [('beta', (13, 30)), ('gamma', (30, 80))]:
+                        nyq = lfp_loader.fs / 2
+                        b, a = butter(4, [low/nyq, high/nyq], btype='band')
+                        filt = filtfilt(b, a, lfp_trace)
+                        pwr = np.abs(hilbert(filt))**2
+                        # Resample to ICA bins
+                        f_interp = interp1d(ts, pwr, bounds_error=False, fill_value=0)
+                        f_name = f'lfp_{band_name}_power'
+                        aux_signals[f_name] = f_interp(bin_centers)
+                        print(f"    Added {f_name}")
+        except Exception as e:
+            print(f"    Warning: Could not load LFP power: {e}")
+
+    # 4.2 Dopamine
+    if hasattr(paths, 'tdt_dff') and paths.tdt_dff and paths.tdt_dff.exists():
+        try:
+            photo_loader = PhotometryDataLoader(paths.base_path)
+            da_data = photo_loader.load(paths.tdt_dff, paths.tdt_raw)
+            f_interp = interp1d(da_data['dff_timestamps'], da_data['dff_values'], bounds_error=False, fill_value=0)
+            aux_signals['dopamine'] = f_interp(bin_centers)
+            print("    Added dopamine signal")
+        except Exception as e:
+            print(f"    Warning: Could not load dopamine: {e}")
+
+    # 4.3 VAME Motifs
+    if paths.vame_dir and paths.vame_dir.exists():
+        try:
+            vame_loader = VAMEDataLoader(paths.base_path)
+            vame_data = vame_loader.load(paths.vame_dir)
+            vame_labels = vame_data['labels']
+            vame_ts = np.arange(len(vame_labels)) / 60.0 # Assuming 60fps
+            # Dominant motif per bin
+            f_interp = interp1d(vame_ts, vame_labels, kind='nearest', bounds_error=False, fill_value=-1)
+            aux_signals['vame_motif'] = f_interp(bin_centers).astype(int)
+            print("    Added VAME motifs")
+        except Exception as e:
+            print(f"    Warning: Could not load VAME motifs: {e}")
+
+    # 4.4 Behavioral Events
+    event_loader = EventDataLoader(paths.base_path)
+    for ev_type in ['reward', 'licking', 'corner']:
+        try:
+            times = event_loader.get_event_times_by_type(ev_type, paths)
+            hist, _ = np.histogram(times, bins=bin_edges)
+            aux_signals[f'ev_{ev_type}'] = (hist > 0).astype(int)
+            print(f"    Added {ev_type} events")
+        except:
+            pass
+
+    # --- 5. Compute Correlations ---
+    print("  Computing multimodal correlations...")
+    ic_cols = [f'IC{i+1}' for i in range(components.shape[1])]
+    df_components = pd.DataFrame(components, columns=ic_cols)
+    
+    correlations = []
+    for ic_col in ic_cols:
+        ic_data = df_components[ic_col]
+        ic_corrs = {'component': ic_col}
+        for aux_col in aux_signals.columns:
+            if aux_col == 'time_sec': continue
+            # Handle categorical Vame separately or just use one-hot? 
+            # For simplicity, we use Pearson for continuous and point-biserial for binary.
+            try:
+                valid = ~np.isnan(aux_signals[aux_col]) & ~np.isnan(ic_data)
+                if np.sum(valid) > 10:
+                    c = np.corrcoef(ic_data[valid], aux_signals[aux_col][valid])[0, 1]
+                    ic_corrs[aux_col] = c
+            except:
+                ic_corrs[aux_col] = 0
+        correlations.append(ic_corrs)
+    
+    df_corr = pd.DataFrame(correlations)
+    df_corr.to_csv(output_dir / 'ica_multimodal_correlations.csv', index=False)
+    print(f"  Correlations saved to {output_dir / 'ica_multimodal_correlations.csv'}")
+
+    # --- 6. Component Stats & Mapping ---
+    print("  Analyzing component stats and spatial mapping...")
+    component_stats = []
+    
+    for i in range(components.shape[1]):
+        ic_col = f'IC{i+1}'
+        component = components[:, i]
+        kurtosis = np.mean((component - np.mean(component))**4) / (np.std(component)**4 + 1e-10)
+        
+        # Weights for this IC
+        weights = mixing_matrix[:, i]
+        
+        # Identify top neurons
+        threshold = np.percentile(np.abs(weights), 90)
+        strong_mask = np.abs(weights) >= threshold
+        
+        top_feat = "None"
+        if not df_corr.empty:
+            row = df_corr[df_corr['component'] == ic_col].drop(columns=['component']).abs()
+            if not row.empty:
+                top_feat = row.idxmax(axis=1).values[0]
+
+        component_stats.append({
+            'component_id': ic_col,
+            'kurtosis': kurtosis,
+            'n_strong_neurons': np.sum(strong_mask),
+            'top_feature': top_feat
+        })
+        
+        # Generate Spatial Map
+        ic_weights_df = pd.DataFrame({
+            'weight': weights
+        }, index=active_clusters)
+        
+        _plot_shank_location(ic_weights_df, 'weight', 
+                            output_dir / f'ICA_spatial_{ic_col}.png', 
+                            f"Spatial Map: {ic_col}\n(Kurtosis={kurtosis:.2f})", 
+                            paths, colormap_center=0)
+
+    # --- 7. Final Plots ---
+    try:
+        # Correlation Heatmap
+        plt.figure(figsize=(12, 8))
+        plot_corr = df_corr.set_index('component')
+        sns.heatmap(plot_corr, cmap='RdBu_r', center=0, annot=True, fmt=".2f")
+        plt.title("ICA Component Correlations with Behavior/Physiology")
+        plt.tight_layout()
+        plt.savefig(output_dir / 'ica_correlation_summary.png')
+        plt.close()
+
+        # Component Timecourse (Top 5)
+        n_p = min(5, components.shape[1])
+        fig, axes = plt.subplots(n_p, 1, figsize=(15, 3*n_p), sharex=True)
+        if n_p == 1: axes = [axes]
+        for i in range(n_p):
+            axes[i].plot(bin_centers, components[:, i], color='black', lw=0.8)
+            axes[i].set_ylabel(f'IC{i+1}')
+            axes[i].set_title(f"IC{i+1} (Top Feature: {component_stats[i]['top_feature']})")
+        axes[-1].set_xlabel("Time (s)")
+        plt.tight_layout()
+        plt.savefig(output_dir / 'ica_timecourse_sample.png')
+        plt.close()
+    except Exception as e:
+        print(f"  Warning plotting summary: {e}")
+
+    # Save components and stats
+    df_components['time_sec'] = bin_centers
+    df_components.to_csv(output_dir / 'ica_components.csv', index=False)
+    pd.DataFrame(component_stats).to_csv(output_dir / 'ica_component_stats.csv', index=False)
+    
+    print("\nICA decomposition analysis complete.")
+    return df_components, pd.DataFrame(component_stats)

@@ -24,7 +24,7 @@ from data_loader import (
     print_data_summary,
     DataPaths
 )
-from analyses import (
+from analyses_population import (
     calculate_event_tuning, 
     calculate_movement_tuning,
     calculate_lfp_peth,
@@ -43,25 +43,14 @@ from analyses import (
     analyze_reward_history,
     analyze_history_dependence_glm,
     predict_reaction_time_multimodal,
-    # analyze_decision_accumulation,
-    # analyze_choice_prediction,
-
-    # analyze_reversal_learning_dynamics,
-    # analyze_pre_switch_activity,
-    # analyze_post_switch_adaptation,
-    # analyze_learning_curves,
-    # analyze_navigation_efficiency,
-
-    # analyze_population_manifolds,
-    # analyze_population_trajectories_by_direction,
-    # analyze_dimensionality_reduction,
-    # analyze_phase_space_trajectories,
-    # analyze_ica_decomposition,
-    # analyze_decoding_performance,
-    # analyze_population_statistics,
-    # generate_publication_summary,
-
-    # analyze_lfp_movement_power,
+    analyze_choice_prediction,
+    analyze_population_statistics,
+    analyze_population_manifolds,
+    analyze_population_trajectories_by_direction,
+    analyze_phase_space_trajectories,
+    analyze_ica_decomposition)
+from analyses_lfp import(
+    analyze_lfp_movement_power,
     # analyze_theta_oscillations,
     # analyze_phase_amplitude_coupling,
     # analyze_cross_frequency_coupling,
@@ -189,80 +178,40 @@ def run_predict_reaction_time_multimodal(paths: DataPaths):
     print("Running multimodal reaction time prediction analysis...")
     predict_reaction_time_multimodal(paths)
 
-# def run_decision_accumulation_analysis(paths: DataPaths):
-#     """Run decision accumulation analysis."""
-#     print("Running decision accumulation analysis...")
-#     analyze_decision_accumulation(paths)
+def run_choice_prediction_analysis(paths: DataPaths):
+    """Run choice prediction analysis."""
+    print("Running choice prediction analysis...")
+    analyze_choice_prediction(paths)
 
-# def run_choice_prediction_analysis(paths: DataPaths):
-#     """Run choice prediction analysis."""
-#     print("Running choice prediction analysis...")
-#     analyze_choice_prediction(paths)
+def run_population_statistics_analysis(paths: DataPaths):
+    """Run population statistics across all analyses."""
+    print("Running population statistics analysis...")
+    analyze_population_statistics(paths)
 
-# def run_reversal_learning_analysis(paths: DataPaths):
-#     """Run analysis of reversal learning dynamics."""
-#     print("Running reversal learning dynamics analysis...")
-#     analyze_reversal_learning_dynamics(paths)
+def run_population_manifolds_analysis(paths: DataPaths):
+    """Run population manifolds analysis."""
+    print("Running population manifolds analysis...")
+    analyze_population_manifolds(paths)
 
-# def run_post_switch_adaptation_analysis(paths: DataPaths):
-#     """Run post-switch adaptation analysis."""
-#     print("Running post-switch adaptation analysis...")
-#     analyze_post_switch_adaptation(paths)
+def run_population_trajectories_by_direction_analysis(paths: DataPaths):
+    """Run population trajectory analysis comparing CW vs CCW."""
+    print("Running population trajectory analysis by direction...")
+    analyze_population_trajectories_by_direction(paths, method='pca')
 
-# def run_learning_curves_analysis(paths: DataPaths):
-#     """Run learning curves analysis."""
-#     print("Running learning curves analysis...")
-#     analyze_learning_curves(paths)
+def run_phase_space_trajectories_analysis(paths: DataPaths):
+    """Run phase space trajectories analysis."""
+    print("Running phase space trajectories analysis...")
+    analyze_phase_space_trajectories(paths)
 
-# def run_navigation_efficiency_analysis(paths: DataPaths):
-#     """Run navigation efficiency analysis."""
-#     print("Running navigation efficiency analysis...")
-#     analyze_navigation_efficiency(paths)
+def run_ica_decomposition_analysis(paths: DataPaths):
+    """Run ICA decomposition analysis."""
+    print("Running ICA decomposition analysis...")
+    analyze_ica_decomposition(paths)
 
-# def run_population_manifolds_analysis(paths: DataPaths):
-#     """Run population manifolds analysis."""
-#     print("Running population manifolds analysis...")
-#     analyze_population_manifolds(paths)
-
-# def run_population_trajectories_by_direction_analysis(paths: DataPaths):
-#     """Run population trajectory analysis comparing CW vs CCW."""
-#     print("Running population trajectory analysis by direction...")
-#     analyze_population_trajectories_by_direction(paths, method='pca')
-
-# def run_dimensionality_reduction_analysis(paths: DataPaths):
-#     """Run dimensionality reduction (PCA) analysis."""
-#     print("Running dimensionality reduction analysis...")
-#     analyze_dimensionality_reduction(paths, method='pca')
-
-# def run_phase_space_trajectories_analysis(paths: DataPaths):
-#     """Run phase space trajectories analysis."""
-#     print("Running phase space trajectories analysis...")
-#     analyze_phase_space_trajectories(paths)
-
-# def run_ica_decomposition_analysis(paths: DataPaths):
-#     """Run ICA decomposition analysis."""
-#     print("Running ICA decomposition analysis...")
-#     analyze_ica_decomposition(paths)
-
-# def run_decoding_analysis(paths: DataPaths):
-#     """Run decoding analysis (behavior from neural activity)."""
-#     print("Running decoding analysis...")
-#     analyze_decoding_performance(paths)
-
-# def run_population_statistics_analysis(paths: DataPaths):
-#     """Run population statistics across all analyses."""
-#     print("Running population statistics analysis...")
-#     analyze_population_statistics(paths)
-
-# def run_publication_summary_generation(paths: DataPaths):
-#     """Generate publication summary integrating all analyses."""
-#     print("Generating publication summary...")
-#     generate_publication_summary(paths)
-
-# def run_lfp_power_analysis(paths: DataPaths):
-#     """Run LFP power analysis around movement."""
-#     print("Running LFP power analysis...")
-#     analyze_lfp_movement_power(paths)
+def run_lfp_power_analysis(paths: DataPaths):
+    """Run LFP power analysis around movement."""
+    print("Running LFP power analysis...")
+    analyze_lfp_movement_power(paths)
 
 # def run_theta_analysis(paths: DataPaths):
 #     """Run LFP theta oscillation analysis."""
@@ -429,21 +378,13 @@ ANALYSIS_FUNCTIONS = {
     'reward_history': run_reward_history_analysis,
     'history_glm': run_history_glm_analysis,
     'predict_rt': run_predict_reaction_time_multimodal,
-    # 'decision_accumulation': run_decision_accumulation_analysis,
-    # 'choice_prediction': run_choice_prediction_analysis,
-    # 'reversal': run_reversal_learning_analysis,
-    # 'post_switch_adaptation': run_post_switch_adaptation_analysis,
-    # 'learning_curves': run_learning_curves_analysis,
-    # 'navigation_efficiency': run_navigation_efficiency_analysis,
-    # 'population_manifolds': run_population_manifolds_analysis,
-    # 'population_trajectories_direction': run_population_trajectories_by_direction_analysis,
-    # 'dimensionality': run_dimensionality_reduction_analysis,
-    # 'phase_space': run_phase_space_trajectories_analysis,
-    # 'ica': run_ica_decomposition_analysis,
-    # 'decoding': run_decoding_analysis,
-    # 'population_stats': run_population_statistics_analysis,
-    # 'publication_summary': run_publication_summary_generation,
-    # 'lfp_power': run_lfp_power_analysis,
+    'choice_prediction': run_choice_prediction_analysis,
+    'population_stats': run_population_statistics_analysis,
+    'population_manifolds': run_population_manifolds_analysis,
+    'population_trajectories_direction': run_population_trajectories_by_direction_analysis,
+    'phase_space': run_phase_space_trajectories_analysis,
+    'ica': run_ica_decomposition_analysis,
+    'lfp_power': run_lfp_power_analysis,
     # 'theta_osc': run_theta_analysis,
     # 'pac': run_pac_analysis,
     # 'cfc': run_cfc_analysis,

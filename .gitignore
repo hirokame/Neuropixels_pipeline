@@ -1,5 +1,7 @@
 # Big data / analysis outputs
 DemoData/
+DemoData_3546/
+DemoData_3549/
 *.npy
 *.npz
 *.pkl

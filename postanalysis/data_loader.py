@@ -776,6 +776,90 @@ class StrobeDataLoader(DataStreamLoader):
         logger.info(f"Loaded {len(strobe_seconds)} strobe timestamps")
         return strobe_seconds
 
+class VAMEDataLoader(DataStreamLoader):
+    """
+    Loader for VAME behavioral motif data.
+    VAME data is typically structured as:
+    vame_dir / results / <session_name> / VAME_Stability / <method>-<n_clusters> / <labels>.npy
+    """
+    def load(self, vame_dir: Path, method: str = 'kmeans', n_clusters: int = 10) -> Dict[str, Any]:
+        """
+        Load VAME labels and latent vectors.
+        
+        Args:
+            vame_dir: Path to VAME project directory
+            method: 'kmeans' or 'hmm'
+            n_clusters: Number of clusters (motifs)
+            
+        Returns:
+            Dict containing labels, latent_vectors, and metadata
+        """
+        if not vame_dir or not vame_dir.exists():
+            raise FileNotFoundError(f"VAME directory not found: {vame_dir}")
+            
+        results_dir = vame_dir / "results"
+        if not results_dir.exists():
+            raise FileNotFoundError(f"VAME results directory not found: {results_dir}")
+            
+        # 1. Auto-discover session name (should be only one subdirectory in results)
+        session_dirs = [d for d in results_dir.iterdir() if d.is_dir()]
+        if not session_dirs:
+            raise FileNotFoundError(f"No session results found in {results_dir}")
+        
+        # Use the first directory found as the session directory
+        session_dir = session_dirs[0]
+        session_name = session_dir.name
+        
+        stability_dir = session_dir / "VAME_Stability"
+        method_dir = stability_dir / f"{method}-{n_clusters}"
+        
+        if not method_dir.exists():
+            raise FileNotFoundError(f"VAME method directory not found: {method_dir}")
+            
+        # 2. Load Labels
+        label_pattern = f"{n_clusters}_{method}_label_{session_name}.npy"
+        label_path = method_dir / label_pattern
+        
+        if not label_path.exists():
+            # Try a fuzzy match if exact name fails
+            found = list(method_dir.glob(f"*{method}_label*.npy"))
+            if found:
+                label_path = found[0]
+            else:
+                raise FileNotFoundError(f"VAME labels not found in {method_dir}")
+                
+        labels = np.load(label_path)
+        
+        # 3. Load Latent Vectors
+        latent_path = stability_dir / "latent_vectors.npy"
+        latent_vectors = None
+        if latent_path.exists():
+            latent_vectors = np.load(latent_path)
+            
+        # 4. Load Motif Usage and Cluster Centers (if kmeans)
+        motif_usage = None
+        usage_path = method_dir / f"motif_usage_{session_name}.npy"
+        if usage_path.exists():
+            motif_usage = np.load(usage_path)
+            
+        cluster_centers = None
+        if method == 'kmeans':
+            centers_path = method_dir / f"cluster_center_{session_name}.npy"
+            if centers_path.exists():
+                cluster_centers = np.load(centers_path)
+        
+        logger.info(f"Loaded VAME {method} labels for session {session_name}: {len(labels)} frames")
+        
+        return {
+            'labels': labels,
+            'latent_vectors': latent_vectors,
+            'motif_usage': motif_usage,
+            'cluster_centers': cluster_centers,
+            'n_clusters': n_clusters,
+            'method': method,
+            'session_name': session_name
+        }
+
 class LFPDataLoader(DataStreamLoader):
     """
     Load LFP data using SpikeInterface with TPrime synchronization.
@@ -1030,6 +1114,7 @@ class DataPaths:
     date_yymmdd: Optional[str] = None    # YYMMDD format (for TDT: last 2 digits of year, month, day)
     base_path: Optional[Path] = None
     neural_base_path: Optional[Path] = None
+    vame_dir: Optional[Path] = None
 
 
 def convert_date_formats(date_str: str) -> Dict[str, str]:
@@ -1300,6 +1385,23 @@ def load_session_data(
         if session_tdt_dir.exists():
              paths.tdt_dff = next(session_tdt_dir.glob(f"*{mouse_id}*dFF*.mat"), None)
              paths.tdt_raw = next(session_tdt_dir.glob(f"*UnivRAW_offdemod.mat"), None)
+    except: pass
+    
+    # VAME
+    try:
+        # Search for vame_inference_* directories
+        vame_pattern = "vame*"
+        vame_dirs = list(base_path.glob(vame_pattern))
+        for vd in vame_dirs:
+            if vd.is_dir() and mouse_id in vd.name:
+                paths.vame_dir = vd
+                break
+        
+        if not paths.vame_dir:
+             # Look for vame_inference inside a potential subfolder
+             vame_inference = next(base_path.rglob(f"vame_inference_{mouse_id}"), None)
+             if vame_inference:
+                 paths.vame_dir = vame_inference
     except: pass
     
     return paths
