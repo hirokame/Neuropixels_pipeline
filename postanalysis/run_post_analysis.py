@@ -466,13 +466,27 @@ Examples:
     )
     
     parser.add_argument(
-        '--required-data',
-        nargs='+',
-        default=['neural', 'events'],
-        choices=['neural', 'events', 'dlc', 'video', 'tdt'],
-        help='Required data types for validation (default: neural events)'
+        '--task',
+        default='operant',
+        choices=['operant', 'openfield'],
+        help='Behavioral task type (default: operant)'
     )
     
+    parser.add_argument(
+        '--required-data',
+        nargs='+',
+        default=None,
+        choices=['neural', 'events', 'dlc', 'video', 'tdt'],
+        help='Required data types for validation (default: based on task)'
+    )
+    
+    parser.add_argument(
+        '--genotype',
+        default=None,
+        choices=['WT', 'KO'],
+        help='Genotype label for this session (auto-detected from genotype_registry.json if omitted)'
+    )
+
     parser.add_argument(
         '--summary',
         action='store_true',
@@ -488,6 +502,12 @@ Examples:
     
     args = parser.parse_args()
     
+    if args.required_data is None:
+        if args.task == 'openfield':
+            args.required_data = ['neural', 'dlc']
+        else:
+            args.required_data = ['neural', 'events']
+            
     # Validate base path exists
     if not Path(args.base_path).exists():
         print(f"Error: Base path '{args.base_path}' does not exist.")
@@ -499,7 +519,8 @@ Examples:
         mouse_id=args.mouse,
         day=args.day,
         base_path=args.base_path,
-        neural_base_path=args.neural_base_path
+        neural_base_path=args.neural_base_path,
+        genotype=args.genotype,
     )
     
     if not hasattr(paths, 'base_path'):
@@ -533,6 +554,13 @@ Examples:
             print("\nΓ£ô All required data files found.\n")
     
     # Run analysis
+    try:
+        from analyses_openfield import ANALYSIS_FUNCTIONS_OPENFIELD
+    except ImportError:
+        ANALYSIS_FUNCTIONS_OPENFIELD = {}
+        
+    current_analysis_functions = ANALYSIS_FUNCTIONS_OPENFIELD if args.task == 'openfield' else ANALYSIS_FUNCTIONS
+
     analyses_to_run = []
     if args.analysis == 'all':
         analyses_to_run = ['all']
@@ -540,10 +568,10 @@ Examples:
         # Split by comma and strip whitespace
         requested = [a.strip() for a in args.analysis.split(',')]
         for req in requested:
-            if req in ANALYSIS_FUNCTIONS:
+            if req in current_analysis_functions:
                 analyses_to_run.append(req)
             else:
-                print(f"Error: Analysis '{req}' not implemented")
+                print(f"Error: Analysis '{req}' not implemented for task '{args.task}'")
                 sys.exit(1)
 
     if 'all' in analyses_to_run:
@@ -551,7 +579,7 @@ Examples:
         
         skip = True if args.start_from else False
         
-        for name, func in ANALYSIS_FUNCTIONS.items():
+        for name, func in current_analysis_functions.items():
             # Handle resume logic
             if skip:
                 if name == args.start_from:
@@ -573,7 +601,7 @@ Examples:
     else:
         # Run specific list of analyses
         for analysis_name in analyses_to_run:
-            func = ANALYSIS_FUNCTIONS[analysis_name]
+            func = current_analysis_functions[analysis_name]
             
             print(f"\n{'='*60}")
             print(f"Running analysis: {analysis_name}")
