@@ -66,6 +66,217 @@ def _compute_kinematic_metrics(velocity, velocity_times):
         'avg_bout_duration_sec': avg_bout_dur
     }
 
+def _get_vame_transition_matrix(labels, n_states=15):
+    """Computes categorical transition matrix (excluding self-transitions)."""
+    if labels is None or len(labels) < 2:
+        return np.zeros((n_states, n_states))
+    
+    # Extract sequence of state changes (no self-transitions)
+    seq = labels[np.insert(np.diff(labels) != 0, 0, True)]
+    mat = np.zeros((n_states, n_states))
+    for i in range(len(seq) - 1):
+        s1, s2 = seq[i], seq[i+1]
+        if s1 < n_states and s2 < n_states:
+            mat[s1, s2] += 1
+    return mat
+
+
+def _compute_latent_stereotypy(latent_vectors, fps=60, target_hz=6):
+    """Compute continuous stereotypy metrics directly from the 30D latent trajectory.
+
+    Groups:
+        2. 30D Recurrence Quantification Analysis (RQA)
+        3. Latent Space Variance / Compactness (PCA, Cov trace, Participation Ratio)
+        4. Temporal Autocorrelation & AR predictability
+        5. Latent Speed & Path Tortuosity
+        6. Intra-session Similarity (first-half vs second-half DTW)
+    """
+    from sklearn.decomposition import PCA
+    metrics = {}
+
+    T, D = latent_vectors.shape
+    # --- Downsampled version for expensive ops ---
+    step = max(1, fps // target_hz)
+    Z = latent_vectors[::step].astype(np.float32)   # shape: (T', 30)
+    T_ = len(Z)
+
+    # ---------------------------------------------------------------- #
+    # Group 2: 30D RQA                                                  #
+    # ---------------------------------------------------------------- #
+    try:
+        # Use a subsample cap to keep pairwise distance matrix manageable
+        rqa_cap = min(T_, 2000)
+        Zr = Z[:rqa_cap]
+        # Compute pairwise Euclidean distances (upper triangle)
+        diff = Zr[:, None, :] - Zr[None, :, :]   # (N, N, D)
+        dist_mat = np.sqrt((diff ** 2).sum(axis=-1))
+
+        # ε = 10th percentile of all pairwise distances
+        eps = np.percentile(dist_mat, 10)
+        R = (dist_mat <= eps).astype(np.uint8)
+        np.fill_diagonal(R, 0)   # exclude identity line
+
+        N = rqa_cap
+        total_possible = N * (N - 1)
+        rec_rate = R.sum() / total_possible if total_possible > 0 else 0
+
+        # Determinism: %DET and L_max from diagonal line histogram
+        diag_lengths = []
+        for d_offset in range(1, N):
+            diag = np.diagonal(R, offset=d_offset)
+            run, runs = 0, []
+            for v in diag:
+                if v: run += 1
+                elif run > 0: runs.append(run); run = 0
+            if run > 0: runs.append(run)
+            diag_lengths.extend(runs)
+
+        if diag_lengths:
+            diag_lengths = np.array(diag_lengths)
+            min_line = 2
+            long_pts = diag_lengths[diag_lengths >= min_line].sum()
+            all_rec_pts = diag_lengths.sum()
+            det = long_pts / all_rec_pts if all_rec_pts > 0 else 0
+            lmax = int(diag_lengths.max())
+        else:
+            det, lmax = 0, 0
+
+        metrics['vame_latent_rqa_rec'] = float(rec_rate)
+        metrics['vame_latent_rqa_det'] = float(det)
+        metrics['vame_latent_rqa_lmax'] = float(lmax)
+    except Exception as e:
+        logger.warning(f"Latent RQA failed: {e}")
+        metrics.update({'vame_latent_rqa_rec': np.nan, 'vame_latent_rqa_det': np.nan, 'vame_latent_rqa_lmax': np.nan})
+
+    # ---------------------------------------------------------------- #
+    # Group 3: Variance / Compactness                                   #
+    # ---------------------------------------------------------------- #
+    try:
+        cov = np.cov(latent_vectors.T)    # (D, D)
+        eigenvalues = np.linalg.eigvalsh(cov)
+        eigenvalues = eigenvalues[eigenvalues > 0]
+
+        cov_trace = float(np.trace(cov))
+
+        # Participation Ratio: how many dimensions are "active"
+        pr = (eigenvalues.sum() ** 2) / (eigenvalues ** 2).sum() if len(eigenvalues) > 0 else np.nan
+
+        pca = PCA(n_components=3)
+        pca.fit(latent_vectors)
+        pca1_var = float(pca.explained_variance_ratio_[0])
+        pca3_var = float(pca.explained_variance_ratio_[:3].sum())
+
+        metrics['vame_latent_cov_trace'] = cov_trace
+        metrics['vame_latent_participation_ratio'] = float(pr)
+        metrics['vame_latent_pca1_var'] = pca1_var
+        metrics['vame_latent_pca3_var'] = pca3_var
+    except Exception as e:
+        logger.warning(f"Latent Compactness failed: {e}")
+        metrics.update({'vame_latent_cov_trace': np.nan, 'vame_latent_participation_ratio': np.nan,
+                        'vame_latent_pca1_var': np.nan, 'vame_latent_pca3_var': np.nan})
+
+    # ---------------------------------------------------------------- #
+    # Group 4: Temporal Autocorrelation & AR Predictability             #
+    # ---------------------------------------------------------------- #
+    try:
+        lv = latent_vectors  # Use full resolution for autocorr
+        # Mean autocorr at lag 1 across all dims
+        mu = lv.mean(axis=0)
+        lv_c = lv - mu
+        var = (lv_c ** 2).mean(axis=0)
+        autocorr_lag1 = ((lv_c[:-1] * lv_c[1:]).mean(axis=0)) / np.where(var > 0, var, 1)
+        mean_autocorr_lag1 = float(np.mean(autocorr_lag1))
+
+        # AR(1) predictability: R^2 of predicting z_t from z_{t-1}
+        y = lv[1:]     # targets
+        x = lv[:-1]    # predictors (AR shift)
+        beta = np.sum(x * y, axis=0) / np.where(np.sum(x ** 2, axis=0) > 0, np.sum(x ** 2, axis=0), 1)
+        y_hat = x * beta
+        ss_res = ((y - y_hat) ** 2).sum()
+        ss_tot = ((y - y.mean(axis=0)) ** 2).sum()
+        ar1_r2 = float(1 - ss_res / ss_tot) if ss_tot > 0 else 0
+
+        metrics['vame_latent_autocorr_lag1'] = mean_autocorr_lag1
+        metrics['vame_latent_ar1_r2'] = ar1_r2
+    except Exception as e:
+        logger.warning(f"Latent Autocorr failed: {e}")
+        metrics.update({'vame_latent_autocorr_lag1': np.nan, 'vame_latent_ar1_r2': np.nan})
+
+    # ---------------------------------------------------------------- #
+    # Group 5: Latent Speed & Path Tortuosity                          #
+    # ---------------------------------------------------------------- #
+    try:
+        diff_lv = np.diff(latent_vectors, axis=0)
+        latent_vel = np.sqrt((diff_lv ** 2).sum(axis=1))    # per-frame speed
+
+        vel_mean = float(latent_vel.mean())
+        vel_var = float(latent_vel.var())
+
+        # Tortuosity: total path / net displacement over 5-second windows
+        win = fps * 5
+        tortuosity_vals = []
+        for start in range(0, T - win, win):
+            seg = latent_vectors[start:start + win]
+            total_len = latent_vel[start:start + win - 1].sum()
+            displacement = float(np.linalg.norm(seg[-1] - seg[0]))
+            if displacement > 1e-6:
+                tortuosity_vals.append(total_len / displacement)
+        latent_tortuosity = float(np.median(tortuosity_vals)) if tortuosity_vals else np.nan
+
+        # Approximate Lyapunov exponent via divergence of nearby trajectories
+        # Use a finite-time method on the downsampled trajectory
+        nn_divergence = []
+        Zl = Z  # downsampled
+        for i in range(0, len(Zl) - 10, 50):
+            dists = np.sqrt(((Zl - Zl[i]) ** 2).sum(axis=1))
+            dists[i] = np.inf
+            j = np.argmin(dists)
+            if j + 10 < len(Zl) and i + 10 < len(Zl):
+                d0 = dists[j] + 1e-12
+                d1 = float(np.linalg.norm(Zl[i + 10] - Zl[j + 10])) + 1e-12
+                nn_divergence.append(np.log(d1 / d0) / 10)
+        lyapunov = float(np.mean(nn_divergence)) if nn_divergence else np.nan
+
+        metrics['vame_latent_velocity_mean'] = vel_mean
+        metrics['vame_latent_velocity_var'] = vel_var
+        metrics['vame_latent_tortuosity'] = latent_tortuosity
+        metrics['vame_latent_lyapunov'] = lyapunov
+    except Exception as e:
+        logger.warning(f"Latent Speed/Tortuosity failed: {e}")
+        metrics.update({'vame_latent_velocity_mean': np.nan, 'vame_latent_velocity_var': np.nan,
+                        'vame_latent_tortuosity': np.nan, 'vame_latent_lyapunov': np.nan})
+
+    # ---------------------------------------------------------------- #
+    # Group 6: Intra-session Similarity (half-vs-half DTW approx)      #
+    # ---------------------------------------------------------------- #
+    try:
+        # Split session into first and second half, then subsample further for DTW
+        dtw_cap = 500
+        mid = len(Z) // 2
+        Z1 = Z[:mid][::max(1, mid // dtw_cap)]
+        Z2 = Z[mid:][::max(1, mid // dtw_cap)]
+
+        # Approximate DTW using cumulative distance matrix
+        N1, N2 = len(Z1), len(Z2)
+        D_mat = np.sqrt(((Z1[:, None, :] - Z2[None, :, :]) ** 2).sum(axis=2))
+
+        # Standard DTW DP
+        dtw_dp = np.full((N1, N2), np.inf)
+        dtw_dp[0, 0] = D_mat[0, 0]
+        for i in range(1, N1): dtw_dp[i, 0] = dtw_dp[i-1, 0] + D_mat[i, 0]
+        for j in range(1, N2): dtw_dp[0, j] = dtw_dp[0, j-1] + D_mat[0, j]
+        for i in range(1, N1):
+            for j in range(1, N2):
+                dtw_dp[i, j] = D_mat[i, j] + min(dtw_dp[i-1, j], dtw_dp[i, j-1], dtw_dp[i-1, j-1])
+        dtw_dist = float(dtw_dp[-1, -1]) / (N1 + N2)   # normalize by path length
+
+        metrics['vame_latent_half_session_dtw'] = dtw_dist
+    except Exception as e:
+        logger.warning(f"Latent DTW failed: {e}")
+        metrics['vame_latent_half_session_dtw'] = np.nan
+
+    return metrics
+
 def _compute_vame_metrics(paths):
     """Calculates VAME motif entropy and transition usage."""
     if not paths.vame_dir or not paths.vame_dir.exists():
@@ -80,17 +291,90 @@ def _compute_vame_metrics(paths):
         labels = vame_data['labels']
         if len(labels) == 0: return {}, None
         
+        # 1. Static usage entropy
         unique_states, counts = np.unique(labels, return_counts=True)
         probs = counts / np.sum(counts)
         entropy = scipy.stats.entropy(probs)
         
+        # 2. Transition probability (overall rate of change)
         transitions = np.sum(np.diff(labels) != 0)
         p_transition = transitions / max(1, len(labels) - 1)
         
-        return {
+        # 3. Transition Matrix & Stereotypy Metrics
+        n_states = 15
+        mat = _get_vame_transition_matrix(labels, n_states=n_states)
+                
+        row_sums = mat.sum(axis=1)
+        total_trans = row_sums.sum()
+        
+        # Transition probabilities P(next | current)
+        P = np.divide(mat, row_sums[:, None], out=np.zeros_like(mat), where=row_sums[:, None] != 0)
+        
+        # 1. Transition Pattern Analysis
+        pi = row_sums / total_trans if total_trans > 0 else np.zeros(n_states)
+        cond_entropy = 0
+        motif_entropies = np.zeros(n_states)
+        for i in range(n_states):
+            h_i = scipy.stats.entropy(P[i, :])
+            motif_entropies[i] = h_i
+            if pi[i] > 0:
+                cond_entropy += pi[i] * h_i
+        
+        # Predictability (Mutual Information)
+        next_state_counts = mat.sum(axis=0)
+        p_next = next_state_counts / total_trans if total_trans > 0 else np.zeros(n_states)
+        h_next = scipy.stats.entropy(p_next) if total_trans > 0 else 0
+        mi = h_next - cond_entropy
+        norm_mi = mi / h_next if h_next > 0 else 0
+        
+        # 2. Duration Pattern Analysis (Stability)
+        bout_starts = np.where(np.diff(labels) != 0)[0] + 1
+        runs = np.split(labels, bout_starts)
+        bout_data = [(r[0], len(r)) for r in runs if len(r) > 0]
+        
+        motif_stabilities = np.zeros(n_states)
+        for i in range(n_states):
+            durs = np.array([d for m, d in bout_data if m == i])
+            if len(durs) > 1:
+                mu = np.mean(durs)
+                sigma = np.std(durs)
+                # Stability = 1 / (1 + CV) where CV = sigma / mu
+                stability = 1.0 / (1.0 + (sigma / mu)) if mu > 0 else 0
+                motif_stabilities[i] = stability
+            elif len(durs) == 1:
+                motif_stabilities[i] = 0.5 # Default for single bout 
+        
+        # 3. Combined Stereotypy Index (CSI)
+        # Weighted mean of stabilities by motif usage
+        usage = counts / np.sum(counts)
+        avg_stability = np.sum(usage * motif_stabilities)
+        
+        csi = norm_mi * avg_stability
+        
+        max_trans_prob = np.max(P) if total_trans > 0 else 0
+        
+        result_metrics = {
             'vame_motif_entropy': entropy,
-            'vame_transition_prob': p_transition
-        }, labels
+            'vame_transition_prob': p_transition,
+            'vame_sequence_cond_entropy': cond_entropy,
+            'vame_sequence_mutual_info': mi,
+            'vame_max_transition_prob': max_trans_prob,
+            'vame_combined_stereotypy_index': csi,
+            'vame_motif_entropies': motif_entropies,
+            'vame_motif_stabilities': motif_stabilities
+        }
+        
+        # Continuous latent space metrics (Groups 2-6)
+        latent_vectors = vame_data.get('latent_vectors', None)
+        if latent_vectors is not None and len(latent_vectors) > 1:
+            try:
+                latent_met = _compute_latent_stereotypy(latent_vectors)
+                result_metrics.update(latent_met)
+                logger.info(f"Computed {len(latent_met)} latent stereotypy metrics.")
+            except Exception as e:
+                logger.warning(f"Latent stereotypy metrics failed: {e}")
+        
+        return result_metrics, labels
     except Exception as e:
         logger.error(f"Failed to compute VAME metrics: {e}")
         return {}, None
@@ -675,7 +959,6 @@ def extract_openfield_metrics(paths: DataPaths):
     except Exception as e:
         logger.error(f"Failed to save metrics CSV: {e}")
 
-
 def _compute_rqa(labels, min_line=2):
     if len(labels) < min_line: return {'rqa_determinism': np.nan, 'rqa_laminarity': np.nan, 'rqa_trapping_time': np.nan}
     
@@ -816,8 +1099,15 @@ def _compute_tier1_vame_extended(labels):
     metrics = {}
     if len(labels) < 2: return metrics, []
     
-    runs = np.split(labels, np.where(np.diff(labels) != 0)[0] + 1)
-    bout_durs = [len(r) for r in runs]
+    # Identify starts of new bouts
+    bout_starts = np.where(np.diff(labels) != 0)[0] + 1
+    # Split into sequences of identical motifs
+    runs = np.split(labels, bout_starts)
+    
+    # Store as (motif_id, duration)
+    bout_data = [(r[0], len(r)) for r in runs if len(r) > 0]
+    bout_durs = [d for m, d in bout_data]
+    
     metrics['vame_avg_bout_duration_frames'] = np.mean(bout_durs)
     metrics['vame_max_bout_duration_frames'] = np.max(bout_durs)
     
@@ -832,7 +1122,7 @@ def _compute_tier1_vame_extended(labels):
     rqa = _compute_rqa(labels)
     metrics.update(rqa)
         
-    return metrics, bout_durs
+    return metrics, bout_data
 
 def _compute_tier1_kinematics(velocity, dt):
     metrics = {}
@@ -880,7 +1170,6 @@ def analyze_of_tier1_behavior(paths: DataPaths):
             data_pack['x'] = x_raw[mask]
             data_pack['y'] = y_raw[mask]
             data_pack['vel'] = velocity
-            data_pack['hb_loc'] = hb_loc
             data_pack['m_raw'] = m_raw
     except Exception as e:
         logger.error(f"Tier 1 Kinematics failed: {e}")
@@ -889,25 +1178,22 @@ def analyze_of_tier1_behavior(paths: DataPaths):
         v_met, labels = _compute_vame_metrics(paths)
         metrics.update(v_met)
         if labels is not None:
-             v2_met, bout_durs = _compute_tier1_vame_extended(labels)
+             v2_met, bout_data = _compute_tier1_vame_extended(labels)
              metrics.update(v2_met)
              data_pack['vame_labels'] = labels
-             data_pack['vame_bout_durs'] = bout_durs
+             data_pack['vame_bout_data'] = bout_data
     except Exception as e:
         logger.error(f"Tier 1 VAME failed: {e}")
         
-    fig = plt.figure(figsize=(20, 15))
-    fig.suptitle(f"Tier 1: Comprehensive Behavioral Phenotyping | {paths.mouse_id}", fontsize=20, fontweight='bold', y=0.95)
-    gs = GridSpec(3, 3, figure=fig, hspace=0.4, wspace=0.3)
+    fig = plt.figure(figsize=(20, 20))
+    fig.suptitle(f"Tier 1: Comprehensive Behavioral Phenotyping | {paths.mouse_id}", fontsize=20, fontweight='bold', y=0.96)
+    gs = GridSpec(4, 3, figure=fig, hspace=0.5, wspace=0.3)
     
     # 1. Spatial Coverage
     ax1 = fig.add_subplot(gs[0, 0])
     if 'x' in data_pack:
         hb = ax1.hexbin(data_pack['x'], data_pack['y'], gridsize=30, cmap='inferno', mincnt=1)
         ax1.invert_yaxis()
-        if 'hb_loc' in data_pack and not np.isnan(data_pack['hb_loc'][0]):
-            ax1.plot(data_pack['hb_loc'][0], data_pack['hb_loc'][1], 'r*', markersize=15, label='Home Base')
-            ax1.legend()
         ax1.set_title(f"Spatial Coverage (Entropy: {metrics.get('spatial_entropy', 0):.2f})")
         fig.colorbar(hb, ax=ax1, label='Density')
         
@@ -956,17 +1242,9 @@ def analyze_of_tier1_behavior(paths: DataPaths):
     if 'vame_labels' in data_pack:
         labels = data_pack['vame_labels']
         n_states = 15
-        trans = np.zeros((n_states, n_states))
         
-        seq = [labels[0]]
-        for l in labels[1:]:
-            if l != seq[-1]:
-                seq.append(l)
-                
-        for i in range(len(seq)-1):
-            s1, s2 = seq[i], seq[i+1]
-            if s1 < n_states and s2 < n_states:
-                trans[s1, s2] += 1
+        # Consistent transition matrix calculation
+        trans = _get_vame_transition_matrix(labels, n_states=n_states)
                 
         row_sums = trans.sum(axis=1, keepdims=True)
         trans_prob = np.divide(trans, row_sums, out=np.zeros_like(trans), where=row_sums!=0)
@@ -975,48 +1253,103 @@ def analyze_of_tier1_behavior(paths: DataPaths):
         ax6.set_xlabel("To State")
         ax6.set_ylabel("From State")
         fig.colorbar(im, ax=ax6)
-        
-    # 7. Bout Duration Dist
+    
+    # 7. Motif Stickiness (Bout Duration per Motif)
     ax7 = fig.add_subplot(gs[2, 0])
-    if 'vame_bout_durs' in data_pack and len(data_pack['vame_bout_durs']) > 0:
-        ax7.hist(np.clip(data_pack['vame_bout_durs'], 0, 150), bins=30, color='olive', alpha=0.7, density=True)
-        ax7.set_xlabel("Motif Bout Duration (Frames)")
-        ax7.set_ylabel("Density")
-        ax7.set_title("Motif Bout Durations (Clipped @ 150f)")
-        
-    # 8. RQA Profile
+    avg_durs = np.zeros(15)
+    if 'vame_bout_data' in data_pack and len(data_pack['vame_bout_data']) > 0:
+        bd = data_pack['vame_bout_data']
+        m_ids = np.array([m for m, d in bd])
+        durs = np.array([d for m, d in bd])
+        for i in range(15):
+            m_durs = durs[m_ids == i]
+            avg_durs[i] = np.mean(m_durs) if len(m_durs) > 0 else 0
+        ax7.bar(range(15), avg_durs, color='olive', alpha=0.7)
+        ax7.set_xlabel("VAME Motif ID")
+        ax7.set_ylabel("Avg Duration (Frames)")
+        ax7.set_title("Motif Stickiness (State Persistence)")
+
+    # 8. Stereotypy & Sequence Metrics
     ax8 = fig.add_subplot(gs[2, 1])
-    bars = ['Determinism', 'Laminarity']
-    vals = [metrics.get('rqa_determinism', 0), metrics.get('rqa_laminarity', 0)]
-    colors = ['#1f77b4', '#ff7f0e']
-    ax8.bar(bars, vals, color=colors, alpha=0.8)
+    h_max = np.log2(15)
+    h_cond = metrics.get('vame_sequence_cond_entropy', 0)
+    mi = metrics.get('vame_sequence_mutual_info', 0)
+    pred_score = np.clip(mi / h_max, 0, 1) if h_max > 0 else 0
+    rep_score = np.clip(1 - (h_cond / h_max), 0, 1) if h_max > 0 else 0
+    
+    bars = ['RQA_Det', 'RQA_Lam', 'VAME_Pred', 'VAME_Rep']
+    vals = [metrics.get('rqa_determinism', 0), metrics.get('rqa_laminarity', 0), pred_score, rep_score]
+    ax8.bar(bars, vals, color=['#1f77b4', '#3498db', '#e67e22', '#d35400'], alpha=0.8)
     ax8.set_ylim(0, 1)
-    ax8.set_ylabel("RQA Ratio")
-    ax8.set_title("Recurrence Quantification Analysis")
-    
-    # 9. Summary Panel
+    ax8.set_ylabel("Score (0-1)")
+    ax8.set_title("Behavioral Stereotypy Profile")
+    for i, v in enumerate(vals): ax8.text(i, v + 0.02, f"{v:.2f}", ha='center', va='bottom', fontsize=9)
+
+    # 9. Motif Dynamics (Predictability vs Stability)
     ax9 = fig.add_subplot(gs[2, 2])
-    ax9.axis('off')
+    motif_entropies = metrics.get('vame_motif_entropies', np.zeros(15))
+    motif_stabilities = metrics.get('vame_motif_stabilities', np.zeros(15))
     
+    if np.any(motif_stabilities > 0):
+        # Scale bubble size by overall usage
+        _, counts = np.unique(data_pack.get('vame_labels', []), return_counts=True)
+        usage = np.zeros(15)
+        for i, c in zip(range(15), counts): usage[i] = c / len(data_pack['vame_labels'])
+        
+        scatter = ax9.scatter(motif_entropies, motif_stabilities, s=usage*5000, alpha=0.6, c=range(15), cmap='tab10')
+        ax9.set_xlabel("Transition Entropy (bits)")
+        ax9.set_ylabel("Duration Stability (1/(1+CV))")
+        ax9.set_title("Motif Dynamics (Stability vs Predictability)")
+        ax9.set_ylim(0, 1.1)
+        
+        # Identify "High Stereotypy" quadrant
+        ax9.axvline(np.mean(motif_entropies[motif_entropies > 0]), color='gray', linestyle='--', alpha=0.3)
+        ax9.axhline(np.mean(motif_stabilities[motif_stabilities > 0]), color='gray', linestyle='--', alpha=0.3)
+        for i in range(15):
+            if motif_stabilities[i] > 0:
+                ax9.text(motif_entropies[i], motif_stabilities[i], str(i), fontsize=10, ha='center', va='center', fontweight='bold')
+
+    # 10. Summary Panel (Expanded text row)
+    ax10 = fig.add_subplot(gs[3, :])
+    ax10.axis('off')
     col1 = (
         f"--- Kinematics & Spatial ---\n"
         f"Time in Center: {metrics.get('time_in_center_perc', 0):.1f}%\n"
         f"Peak Speed: {metrics.get('peak_speed_cm_s', 0):.1f} cm/s\n"
         f"Path Tortuosity: {metrics.get('path_tortuosity_mean', 0):.2f}\n"
         f"Homebase Revisits: {metrics.get('homebase_revisits', 0)}\n"
-        f"Cum_Area_Ratio (1st/2nd): {metrics.get('cumulative_area_ratio_first_last_half', 0):.2f}\n"
+        f"Cum_Area_Ratio (1/2): {metrics.get('cumulative_area_ratio_first_last_half', 0):.2f}\n"
     )
     col2 = (
-        f"--- Microstructure & VAME ---\n"
+        f"--- Microstructure & VAME Grammar ---\n"
         f"Turn Angle Mean: {metrics.get('turn_angle_mean_rad_per_frame', 0):.2f} rad\n"
-        f"Bout Peak Accel: {metrics.get('bout_peak_accel_mean', 0):.1f} cm/s^2\n"
-        f"Bout Peak Decel: {metrics.get('bout_peak_decel_mean', 0):.1f} cm/s^2\n"
-        f"Motif Bout Exp: {metrics.get('vame_avg_bout_duration_frames', 0):.1f} f\n"
+        f"Trans Predictability: {metrics.get('vame_sequence_mutual_info', 0):.2f} bits\n"
+        f"Trans Entropy: {metrics.get('vame_sequence_cond_entropy', 0):.2f} bits\n"
+        f"Max Transition Prob: {metrics.get('vame_max_transition_prob', 0):.2f}\n"
+        f"Combined Stereotypy Index (CSI): {metrics.get('vame_combined_stereotypy_index', 0):.2f}\n"
+    )
+    col3 = (
+        f"--- State Stability ---\n"
+        f"Motif Bout Mean: {metrics.get('vame_avg_bout_duration_frames', 0):.1f} f\n"
+        f"Motif Bout Max: {metrics.get('vame_max_bout_duration_frames', 0):.0f} f\n"
+        f"RQA Determinism: {metrics.get('rqa_determinism', 0):.2f}\n"
+        f"RQA Laminarity: {metrics.get('rqa_laminarity', 0):.2f}\n"
         f"RQA Trapping Time: {metrics.get('rqa_trapping_time', 0):.2f} f\n"
     )
-    
-    ax9.text(0.0, 0.5, col1, fontsize=11, va='center', ha='left', family='monospace')
-    ax9.text(0.5, 0.5, col2, fontsize=11, va='center', ha='left', family='monospace')
+    col4 = (
+        f"--- Latent Space ---\n"
+        f"L-RQA Det: {metrics.get('vame_latent_rqa_det', np.nan):.2f}\n"
+        f"L-RQA Lmax: {metrics.get('vame_latent_rqa_lmax', np.nan):.0f}\n"
+        f"L-PCA1 Var: {metrics.get('vame_latent_pca1_var', np.nan):.2f}\n"
+        f"L-Part. Ratio: {metrics.get('vame_latent_participation_ratio', np.nan):.1f}\n"
+        f"L-AR1 R²: {metrics.get('vame_latent_ar1_r2', np.nan):.2f}\n"
+        f"L-Vel Mean: {metrics.get('vame_latent_velocity_mean', np.nan):.2f}\n"
+        f"L-DTW (half): {metrics.get('vame_latent_half_session_dtw', np.nan):.2f}\n"
+    )
+    ax10.text(0.00, 0.5, col1, fontsize=10, va='center', ha='left', family='monospace')
+    ax10.text(0.25, 0.5, col2, fontsize=10, va='center', ha='left', family='monospace')
+    ax10.text(0.50, 0.5, col3, fontsize=10, va='center', ha='left', family='monospace')
+    ax10.text(0.75, 0.5, col4, fontsize=10, va='center', ha='left', family='monospace')
     
     out_dir = paths.base_path / "post_analysis" / "tier1_behavior"
     out_dir.mkdir(parents=True, exist_ok=True)

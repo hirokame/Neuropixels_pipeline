@@ -82,6 +82,7 @@ from analyses_lfp import(
     # analyze_predictive_decoding,
     # analyze_ili_by_port,
 )
+from analyses_openfield import analyze_of_tier1_behavior
 
 def run_event_tuning_analysis(paths: DataPaths):
     """Run peri-event time histogram analysis."""
@@ -414,6 +415,7 @@ ANALYSIS_FUNCTIONS = {
     # 'mutual_information': run_mutual_information_analysis,
     # 'predictive_decoding': run_predictive_decoding_analysis,
     # 'ili_by_port': analyze_ili_by_port,
+    'of_tier1_behavior': analyze_of_tier1_behavior,
     'all': None
 }
 
@@ -439,6 +441,12 @@ Examples:
         '--day',
         required=True,
         help='Date in any format (MMDDYYYY, YYYY-MM-DD, YYMMDD, or YYYYMMDD)'
+    )
+    
+    parser.add_argument(
+        '--task',
+        default=None,
+        help='Task type (e.g., "openfield", "y_maze")'
     )
     
     parser.add_argument(
@@ -532,6 +540,22 @@ Examples:
         else:
             print("\nΓ£ô All required data files found.\n")
     
+    # Determine which analysis dictionary to use based on the task
+    if args.task and args.task.lower() == 'openfield':
+        try:
+            from analyses_openfield import ANALYSIS_FUNCTIONS_OPENFIELD
+            current_analysis_functions = ANALYSIS_FUNCTIONS_OPENFIELD
+        except ImportError:
+            print("Error: Could not import ANALYSIS_FUNCTIONS_OPENFIELD from analyses_openfield")
+            sys.exit(1)
+    else:
+        current_analysis_functions = ANALYSIS_FUNCTIONS
+
+    # Validate start_from argument if using 'all'
+    if args.analysis == 'all' and args.start_from and args.start_from not in current_analysis_functions:
+        print(f"Error: --start-from '{args.start_from}' not found in the selected task's analysis functions.")
+        sys.exit(1)
+
     # Run analysis
     analyses_to_run = []
     if args.analysis == 'all':
@@ -540,18 +564,18 @@ Examples:
         # Split by comma and strip whitespace
         requested = [a.strip() for a in args.analysis.split(',')]
         for req in requested:
-            if req in ANALYSIS_FUNCTIONS:
+            if req in current_analysis_functions:
                 analyses_to_run.append(req)
             else:
-                print(f"Error: Analysis '{req}' not implemented")
+                print(f"Error: Analysis '{req}' not implemented for task '{args.task}'")
                 sys.exit(1)
 
     if 'all' in analyses_to_run:
-        print("Running all available analyses...\n")
+        print(f"Running all available analyses for task '{args.task}'...\n")
         
         skip = True if args.start_from else False
         
-        for name, func in ANALYSIS_FUNCTIONS.items():
+        for name, func in current_analysis_functions.items():
             # Handle resume logic
             if skip:
                 if name == args.start_from:
@@ -573,7 +597,7 @@ Examples:
     else:
         # Run specific list of analyses
         for analysis_name in analyses_to_run:
-            func = ANALYSIS_FUNCTIONS[analysis_name]
+            func = current_analysis_functions[analysis_name]
             
             print(f"\n{'='*60}")
             print(f"Running analysis: {analysis_name}")
@@ -585,6 +609,7 @@ Examples:
                 import traceback
                 traceback.print_exc()
                 # Don't exit, try next analysis
+
     print("\nAnalysis complete!")
 if __name__ == "__main__":
     main()

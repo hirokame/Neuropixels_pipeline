@@ -1109,6 +1109,7 @@ class DataPaths:
     # Metadata
     mouse_id: Optional[str] = None
     date_str: Optional[str] = None
+    genotype: Optional[str] = 'Unknown'
     date_mmddyyyy: Optional[str] = None  # MMDDYYYY format
     date_yyyymmdd: Optional[str] = None  # YYYY-MM-DD format
     date_yymmdd: Optional[str] = None    # YYMMDD format (for TDT: last 2 digits of year, month, day)
