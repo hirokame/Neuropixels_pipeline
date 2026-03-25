@@ -142,66 +142,12 @@ class SpikeDataLoader(DataStreamLoader):
         else:
             logger.warning("No unit labels available. Cannot filter by label 1 or 2. Using all units.")
 
-        # 5. Load mean waveforms from templates.npy (Kilosort4)
-        mean_waveforms = {}   # cluster_id -> 1-D array (peak-channel waveform)
-        waveform_metrics = {}  # cluster_id -> {'trough_to_peak_ms': float, 'spike_width_ms': float}
-        try:
-            templates_path = kilosort_dir / "templates.npy"
-            spike_templates_path = kilosort_dir / "spike_templates.npy"
-            if templates_path.exists():
-                templates = np.load(str(templates_path))  # (n_templates, n_samples, n_channels)
-                # Map each cluster to its template index via spike_templates
-                if spike_templates_path.exists():
-                    spike_templates = np.load(str(spike_templates_path)).flatten()
-                    cluster_template = {}
-                    for cid in unique_clusters:
-                        mask = spike_clusters == cid
-                        if mask.sum() > 0:
-                            tmpl_idx = int(np.bincount(spike_templates[mask]).argmax())
-                            cluster_template[cid] = tmpl_idx
-                else:
-                    # Fallback: template index == cluster id
-                    cluster_template = {cid: cid for cid in unique_clusters if cid < len(templates)}
-
-                fs_ap = 30000.0  # Neuropixels AP sampling rate
-                for cid, tidx in cluster_template.items():
-                    if tidx >= len(templates):
-                        continue
-                    wf = templates[tidx]  # (n_samples, n_channels)
-                    peak_ch = int(np.argmax(np.ptp(wf, axis=0)))
-                    w = wf[:, peak_ch]  # 1-D waveform on peak channel
-                    mean_waveforms[cid] = w
-                    # Trough-to-peak: time from negative minimum to next positive maximum
-                    trough_idx = int(np.argmin(w))
-                    if trough_idx < len(w) - 1:
-                        peak_idx = trough_idx + int(np.argmax(w[trough_idx:]))
-                        ttp_ms = (peak_idx - trough_idx) / fs_ap * 1000.0
-                    else:
-                        ttp_ms = np.nan
-                    # Spike width: half-width of the negative trough
-                    half_amp = w[trough_idx] / 2.0
-                    above = np.where(w[:trough_idx] >= half_amp)[0]
-                    below = np.where(w[trough_idx:] >= half_amp)[0]
-                    if len(above) > 0 and len(below) > 0:
-                        width_ms = (trough_idx + below[0] - above[-1]) / fs_ap * 1000.0
-                    else:
-                        width_ms = np.nan
-                    waveform_metrics[cid] = {
-                        'trough_to_peak_ms': ttp_ms,
-                        'spike_width_ms': width_ms
-                    }
-                logger.info(f"Loaded mean waveforms for {len(mean_waveforms)} clusters from templates.npy")
-        except Exception as e:
-            logger.debug(f"Could not load mean waveforms: {e}")
-
         return {
             'spike_times_sec': spike_times_sec,
             'spike_clusters': spike_clusters,
             'unique_clusters': unique_clusters,
             'unit_types': unit_types,
-            'unit_labels': unit_labels,
-            'mean_waveforms': mean_waveforms,
-            'waveform_metrics': waveform_metrics,
+            'unit_labels': unit_labels
         }
 
 
@@ -754,21 +700,11 @@ class PhotometryDataLoader(DataStreamLoader):
         try:
             if dff_obj.shape == (1, 1):
                 val = dff_obj[0, 0]
-                if hasattr(val, 'dtype') and val.dtype.names and 'box' in val.dtype.names:
-                    box_struct = val['box']
-                    if box_struct.size > 0:
-                        val = box_struct[0, 0]
-                        
                 if hasattr(val, 'dtype') and val.dtype.names and 'pair' in val.dtype.names:
                     pair_struct = val['pair']
                     if pair_struct.size > 0:
-                        data_arr = pair_struct[0, 0]['data']
-                        if data_arr.dtype == 'O' and data_arr.size >= 3:
-                            # 0: isosbestic, 1: signal, 2: calculated dff
-                            dff_obj = data_arr[0, 2]
-                        else:
-                            dff_obj = data_arr
-                        logger.info("  Extracted dFF data from nested 'box' -> 'pair' struct.")
+                        dff_obj = pair_struct[0, 0]['data']
+                        logger.info("  Extracted dFF data from nested 'pair' struct.")
         except Exception as e:
             logger.warning(f"  Failed to traverse struct hierarchy: {e}. Using raw object.")
 
@@ -1176,7 +1112,6 @@ class DataPaths:
     date_mmddyyyy: Optional[str] = None  # MMDDYYYY format
     date_yyyymmdd: Optional[str] = None  # YYYY-MM-DD format
     date_yymmdd: Optional[str] = None    # YYMMDD format (for TDT: last 2 digits of year, month, day)
-    genotype: Optional[str] = None       # e.g. "WT" or "KO" (Shank3b)
     base_path: Optional[Path] = None
     neural_base_path: Optional[Path] = None
     vame_dir: Optional[Path] = None
@@ -1326,57 +1261,22 @@ def print_data_summary(paths: DataPaths):
     print(f"\n{'='*60}\n")
 
 
-def load_genotype_registry(base_path: Path) -> dict:
-    """Load mouse_id -> genotype mapping from genotype_registry.json.
-
-    The file should live at ``<base_path>/genotype_registry.json`` and contain
-    a flat JSON object, e.g.::
-
-        {"1818": "WT", "1819": "KO", "1820": "KO"}
-
-    Returns an empty dict if the file is missing or malformed.
-    """
-    import json
-    registry_path = base_path / "genotype_registry.json"
-    if not registry_path.exists():
-        return {}
-    try:
-        with open(registry_path) as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
 def load_session_data(
     mouse_id: str,
     day: str,
     base_path: str = ".",
-    neural_base_path: Optional[str] = None,
-    genotype: Optional[str] = None,
+    neural_base_path: Optional[str] = None
 ) -> DataPaths:
-    """Main function to find and load all data files for a session.
-
-    Parameters
-    ----------
-    genotype : str, optional
-        Explicit genotype label (e.g. "WT" or "KO").  When *None* the
-        function tries ``<base_path>/genotype_registry.json`` for an
-        automatic lookup.
-    """
+    """Main function to find and load all data files for a session."""
     base_path = Path(base_path)
     if neural_base_path is None:
         neural_base_path = base_path
     else:
         neural_base_path = Path(neural_base_path)
-
-    # Resolve genotype
-    if genotype is None:
-        registry = load_genotype_registry(base_path)
-        genotype = registry.get(mouse_id)
-
+    
     # 1. Convert Dates
     date_formats = convert_date_formats(day)
-
+    
     # 2. Init DataPaths
     paths = DataPaths(
         mouse_id=mouse_id,
@@ -1384,7 +1284,6 @@ def load_session_data(
         date_mmddyyyy=date_formats['mmddyyyy'],
         date_yyyymmdd=date_formats['yyyymmdd'],
         date_yymmdd=date_formats['yymmdd'],
-        genotype=genotype,
         base_path=base_path,
         neural_base_path=neural_base_path
     )
@@ -1409,14 +1308,8 @@ def load_session_data(
                 break
                 
     if imec_dir:
-        logger.info(f"Found neural base directory: {imec_dir}")
         paths.neural_base = imec_dir
         paths.kilosort_dir = imec_dir / "kilosort4" / "sorter_output"
-        if not paths.kilosort_dir.exists():
-            # Fallback to direct kilosort folder
-            if (imec_dir / "kilosort").exists():
-                 paths.kilosort_dir = imec_dir / "kilosort"
-        
         paths.lfp_dir = imec_dir / "LFP"
         paths.rastermap_dir = imec_dir / "rastermap"
         paths.analyzer_beh = imec_dir / "analyzer_beh"
@@ -1429,8 +1322,6 @@ def load_session_data(
             strobe_npy = paths.kilosort_dir / "strobe_seconds.npy"
             if strobe_npy.exists():
                 paths.strobe_seconds = strobe_npy
-    else:
-        logger.warning(f"Could not find neural session directory matching: {session_glob}")
 
     # 4. Locate Behavioral/Other Files using Globbing
 
@@ -1466,29 +1357,11 @@ def load_session_data(
     try:
         dlc_dir = base_path / "DLC"
         if dlc_dir.exists():
-            # Try multiple glob patterns
-            globs = [
-                f"*{mouse_id}*{date_formats['yyyymmdd']}*.h5",
-                f"*{mouse_id}*{date_formats['yyyymmdd']}*DLC*.h5",
-                f"*{mouse_id}*{date_formats['mmddyyyy']}*.h5",
-                f"*{mouse_id}*{date_formats['mmddyyyy']}*DLC*.h5",
-            ]
-            for g in globs:
-                f = next(dlc_dir.glob(g), None)
-                if f:
-                    paths.dlc_h5 = f
-                    logger.info(f"Found DLC file: {f.name} using glob: {g}")
-                    break
-            if not paths.dlc_h5:
-                # Last resort fuzzy match
-                f = next(dlc_dir.glob(f"*{mouse_id}*.h5"), None)
-                if f:
-                    paths.dlc_h5 = f
-                    logger.warning(f"Found DLC file using fuzzy match (no date): {f.name}")
-        else:
-            logger.warning(f"DLC directory not found at {dlc_dir}")
-    except Exception as e:
-        logger.debug(f"DLC search error: {e}")
+            f = next(dlc_dir.glob(f"*{mouse_id}*{date_formats['yyyymmdd']}*DLC*.h5"), None)
+            if not f:
+                f = next(dlc_dir.glob(f"*{mouse_id}*{date_formats['mmddyyyy']}*DLC*.h5"), None)
+            paths.dlc_h5 = f
+    except: pass
 
     # Video
     try:
@@ -1510,13 +1383,8 @@ def load_session_data(
                  session_tdt_dir = found[0]
         
         if session_tdt_dir.exists():
-             dff = next(session_tdt_dir.glob(f"*{mouse_id}*dFF*.mat"), None)
-             if not dff: dff = next(session_tdt_dir.glob(f"*dFF*.mat"), None)
-             paths.tdt_dff = dff
-             
-             raw = next(session_tdt_dir.glob(f"*{mouse_id}*UnivRAW_offdemod.mat"), None)
-             if not raw: raw = next(session_tdt_dir.glob(f"*UnivRAW_offdemod.mat"), None)
-             paths.tdt_raw = raw
+             paths.tdt_dff = next(session_tdt_dir.glob(f"*{mouse_id}*dFF*.mat"), None)
+             paths.tdt_raw = next(session_tdt_dir.glob(f"*UnivRAW_offdemod.mat"), None)
     except: pass
     
     # VAME
