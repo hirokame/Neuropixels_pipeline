@@ -12,6 +12,7 @@ DemoData_3549/
 *.dat
 *.mat
 *.csv
+*.mp4
 
 # Figures
 *.png
@@ -33,3 +34,10 @@ __pycache__/
 # Env stuff
 .env
 .venv/
+
+# Claude
+.claude/
+
+# Ignore macOS hidden resource files
+._*
+.DS_Store
