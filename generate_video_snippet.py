@@ -8,13 +8,10 @@ Generate a 30-second composite video snippet combining:
   6. Firing rate per cell on 4-shank probe map
   7. Beta-band power heatmap on 4-shank probe map
   8. Gamma-band power heatmap on 4-shank probe map
+    9. Dopamine (dF/F) trace from TDT (scrolling)
 
 Usage:
-    python generate_video_snippet.py \
-        --mouse 3546 --day 01072026 \
-        --base-path "/Volumes/Extreme SSD/Neuropixels/Python/DemoData_3546" \
-        --start-time 120.0 --duration 30.0 \
-        --output composite_snippet.mp4
+    python generate_video_snippet.py --mouse 1818 --day 09182025 --base-path "/Volumes/Extreme SSD/Neuropixels/Python/DemoData" --start-time 300.0 --duration 1.0 --output composite_snippet_v2.mp4
 """
 
 import argparse
@@ -51,6 +48,7 @@ from postanalysis.data_loader import (
     SpikeDataLoader,
     DLCDataLoader,
     EventDataLoader,
+    PhotometryDataLoader,
     LFPDataLoader,
     StrobeDataLoader,
     print_data_summary,
@@ -306,6 +304,66 @@ def generate_composite_video(
     )
 
     # ------------------------------------------------------------------
+    # 6b. Load dopamine photometry (optional)
+    # ------------------------------------------------------------------
+    logger.info("Loading dopamine photometry (optional) ...")
+    dopamine_available = False
+    dff_values = np.array([])
+    dff_times = np.array([])
+    dff_vmin, dff_vmax = -1.0, 1.0
+    dff_global_vmin, dff_global_vmax = -1.0, 1.0
+
+    if paths.tdt_dff and paths.tdt_dff.exists() and paths.tdt_raw and paths.tdt_raw.exists():
+        try:
+            photo_loader = PhotometryDataLoader(paths.neural_base)
+            tdt_data = photo_loader.load(paths.tdt_dff, paths.tdt_raw)
+
+            dff_values = np.asarray(tdt_data.get('dff_values', np.array([]))).flatten()
+            dff_times = np.asarray(tdt_data.get('dff_timestamps', np.array([]))).flatten()
+
+            valid = np.isfinite(dff_values) & np.isfinite(dff_times)
+            dff_values = dff_values[valid]
+            dff_times = dff_times[valid]
+
+            if len(dff_times) > 1:
+                order = np.argsort(dff_times)
+                dff_times = dff_times[order]
+                dff_values = dff_values[order]
+
+                # If dF/F timestamps are absolute and don't overlap session time,
+                # shift them onto the strobe timebase for plotting.
+                overlap = (dff_times.max() >= data_start) and (dff_times.min() <= end_time)
+                if not overlap and len(strobe_times) > 0:
+                    dff_times = dff_times - dff_times[0] + strobe_times[0]
+                    logger.info("Shifted dF/F timestamps to session timebase using strobe start.")
+
+                if len(dff_values) > 7:
+                    dff_values = gaussian_filter1d(dff_values, sigma=2)
+
+                dff_window_mask = (dff_times >= data_start) & (dff_times < end_time)
+                if np.any(dff_window_mask):
+                    dff_win = dff_values[dff_window_mask]
+                    dff_vmin, dff_vmax = np.percentile(dff_win, [5, 95])
+                else:
+                    dff_vmin, dff_vmax = np.percentile(dff_values, [5, 95])
+
+                if not np.isfinite(dff_vmin) or not np.isfinite(dff_vmax) or dff_vmin == dff_vmax:
+                    dff_vmin, dff_vmax = float(np.min(dff_values)), float(np.max(dff_values))
+                    if dff_vmin == dff_vmax:
+                        dff_vmin -= 1.0
+                        dff_vmax += 1.0
+
+                # Keep a global robust range as fallback when local window is sparse.
+                dff_global_vmin, dff_global_vmax = dff_vmin, dff_vmax
+
+                dopamine_available = True
+                logger.info(f"Loaded dopamine dF/F samples: {len(dff_values)}")
+        except Exception as e:
+            logger.warning(f"Could not load dopamine data: {e}")
+    else:
+        logger.info("No TDT dF/F + RAW files found; dopamine panel will show unavailable.")
+
+    # ------------------------------------------------------------------
     # 7. Load events (lick & water)
     # ------------------------------------------------------------------
     logger.info("Loading lick & water events ...")
@@ -483,9 +541,10 @@ def generate_composite_video(
     #   Row 1: raster (all cols)
     #   Row 2: spectrogram (all cols)
     #   Row 3: speed + events (all cols)
+    #   Row 4: dopamine dF/F + events (all cols)
     gs = gridspec.GridSpec(
-        4, 4,
-        height_ratios=[3, 2.5, 2, 1.2],
+        5, 4,
+        height_ratios=[3, 2.3, 1.8, 1.1, 1.1],
         width_ratios=[2.5, 1, 1, 1],
         hspace=0.38, wspace=0.32,
         left=0.05, right=0.97, top=0.96, bottom=0.04,
@@ -498,6 +557,7 @@ def generate_composite_video(
     ax_raster = fig.add_subplot(gs[1, :])
     ax_spec   = fig.add_subplot(gs[2, :])
     ax_speed  = fig.add_subplot(gs[3, :])
+    ax_dopa   = fig.add_subplot(gs[4, :])
 
     # Note: do NOT use sharex — clear() resets shared limits and causes blank panels.
     # Instead each panel sets its own xlim to (t_win_lo, t_win_hi) every frame.
@@ -622,9 +682,54 @@ def generate_composite_video(
         ax_speed.axvline(t_now, color='r', lw=0.8, alpha=0.7)
         ax_speed.set_xlim(t_win_lo, t_win_hi)
         ax_speed.set_ylabel('Speed\n(cm/s)', fontsize=7)
-        ax_speed.set_xlabel('Time (s)', fontsize=7)
         ax_speed.set_title('Speed | Lick (black) | Water (red)', fontsize=8)
         ax_speed.tick_params(labelsize=6)
+        ax_speed.set_xticklabels([])
+
+        # === (D2) Dopamine dF/F (scrolling) ===
+        ax_dopa.clear()
+        if dopamine_available:
+            dmask = (dff_times >= t_win_lo) & (dff_times < t_win_hi)
+            if np.any(dmask):
+                d_local = dff_values[dmask]
+                ax_dopa.plot(dff_times[dmask], d_local,
+                             color='seagreen', lw=0.9)
+
+                # Adaptive y-range per scrolling window so local transients remain visible.
+                if len(d_local) >= 10:
+                    y0, y1 = np.percentile(d_local, [2, 98])
+                else:
+                    y0, y1 = float(np.min(d_local)), float(np.max(d_local))
+
+                if not np.isfinite(y0) or not np.isfinite(y1):
+                    y0, y1 = dff_global_vmin, dff_global_vmax
+
+                span = y1 - y0
+                min_span = 0.05
+                if span < min_span:
+                    center = 0.5 * (y0 + y1)
+                    y0 = center - min_span / 2
+                    y1 = center + min_span / 2
+
+                pad = 0.08 * (y1 - y0)
+                ax_dopa.set_ylim(y0 - pad, y1 + pad)
+            else:
+                # No local samples in this window: use robust global fallback.
+                ax_dopa.set_ylim(dff_global_vmin, dff_global_vmax)
+            _draw_event_lines(ax_dopa, lick_lw=0.5, water_lw=1.2)
+            ax_dopa.axvline(t_now, color='r', lw=0.8, alpha=0.7)
+            ax_dopa.set_ylabel('dF/F', fontsize=7)
+            ax_dopa.set_title('Dopamine dF/F | Lick (black) | Water (red)', fontsize=8)
+        else:
+            ax_dopa.text(0.5, 0.5, 'Dopamine data unavailable',
+                         transform=ax_dopa.transAxes, ha='center', va='center',
+                         fontsize=8, color='gray')
+            ax_dopa.set_ylabel('dF/F', fontsize=7)
+            ax_dopa.set_title('Dopamine dF/F', fontsize=8)
+
+        ax_dopa.set_xlim(t_win_lo, t_win_hi)
+        ax_dopa.set_xlabel('Time (s)', fontsize=7)
+        ax_dopa.tick_params(labelsize=6)
 
         # === (E) FR on probe map ===
         frame_rel = fi - start_frame_idx
