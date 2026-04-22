@@ -2070,6 +2070,7 @@ def analyze_of_tier3_lfp(paths: DataPaths):
             
         spike_loader = SpikeDataLoader(paths.base_path)
         spike_data = spike_loader.load(paths.kilosort_dir)
+        unique_clusters = spike_data.get('unique_clusters', np.array([]))
         
         lfp_loader = LFPDataLoader(paths.lfp_dir, paths.kilosort_dir)
         channels = lfp_loader.channel_ids
@@ -2108,6 +2109,7 @@ def analyze_of_tier3_lfp(paths: DataPaths):
                 # CSD approx = -(V_top - 2*V_mid + V_bottom)
                 trace = -1.0 * (traces[:, 0] - 2*traces[:, 1] + traces[:, 2])
                 fs = lfp_loader.fs
+                dp['lfp_fs'] = fs
                 
                 # Interpolate velocity to LFP timestamps
                 from scipy.interpolate import interp1d
@@ -2268,8 +2270,15 @@ def analyze_of_tier3_lfp(paths: DataPaths):
                     if paths.tdt_dff and paths.tdt_dff.exists():
                         tdt_loader = PhotometryDataLoader(paths.base_path)
                         tdt_data = tdt_loader.load(paths.tdt_dff, paths.tdt_raw)
-                        dff = tdt_data['dff_values']
-                        ts = tdt_data['dff_timestamps']
+                        dff = np.asarray(tdt_data['dff_values']).flatten()
+                        ts = np.asarray(tdt_data['dff_timestamps']).flatten()
+
+                        # Restrict DA analyses to the same time window as the loaded LFP.
+                        da_window_mask = (ts >= t_start) & (ts <= t_end)
+                        dff = dff[da_window_mask]
+                        ts = ts[da_window_mask]
+                        if len(ts) < 10:
+                            raise ValueError("Insufficient DA samples within the analyzed LFP window")
                         
                         # Interpolate everything to 100Hz for cross-corr
                         t_cc = np.arange(t_start, t_end, 0.01)
@@ -2292,19 +2301,73 @@ def analyze_of_tier3_lfp(paths: DataPaths):
                         # 3D (extended). Phase of LFP at DA transient peaks
                         da_thresh = np.nanmean(dff) + 2.0 * np.nanstd(dff)
                         from scipy.signal import find_peaks
-                        da_peaks_idx, _ = find_peaks(dff, height=da_thresh, distance=int(1.0 / np.median(np.diff(ts))))
-                        if len(da_peaks_idx) > 5:
+                        dt_da = np.nanmedian(np.diff(ts)) if len(ts) > 2 else np.nan
+                        min_peak_distance = int(np.clip(np.round(1.0 / dt_da), 1, 5000)) if np.isfinite(dt_da) and dt_da > 0 else 1
+
+                        # Primary detector: z-scored DA peaks with prominence.
+                        dff_std = np.nanstd(dff)
+                        dff_z = (dff - np.nanmean(dff)) / (dff_std + 1e-12)
+                        da_peaks_idx, _ = find_peaks(dff_z, height=1.5, prominence=0.5, distance=min_peak_distance)
+
+                        # Fallback detector: less strict percentile threshold if too few peaks.
+                        if len(da_peaks_idx) < 6:
+                            alt_thresh = np.nanpercentile(dff, 90)
+                            da_peaks_idx, _ = find_peaks(dff, height=alt_thresh, distance=min_peak_distance)
+
+                        metrics['n_da_detected_peaks'] = int(len(da_peaks_idx))
+                        dp['da_peak_phase_source'] = 'detected_peaks'
+
+                        theta_phase_interp = interp1d(
+                            timestamps,
+                            np.unwrap(theta_phase),
+                            bounds_error=False,
+                            fill_value=np.nan
+                        )
+                        beta_phase_interp = interp1d(
+                            timestamps,
+                            np.unwrap(beta_phase),
+                            bounds_error=False,
+                            fill_value=np.nan
+                        ) if 'beta_phase' in locals() else None
+
+                        if len(da_peaks_idx) > 3:
                             da_peak_times = ts[da_peaks_idx]
-                            # Theta phase at each DA transient peak
-                            da_peak_lfp_idx = np.searchsorted(timestamps, da_peak_times) - 1
-                            da_peak_lfp_idx = da_peak_lfp_idx[(da_peak_lfp_idx >= 0) & (da_peak_lfp_idx < len(theta_phase))]
-                            dp['da_peak_theta_phases'] = theta_phase[da_peak_lfp_idx]
-                            dp['da_peak_beta_phases'] = beta_phase[da_peak_lfp_idx] if 'beta_phase' in dir() else []
-                            # Mean vector length = phase concentration
-                            if len(dp['da_peak_theta_phases']) > 3:
-                                mvl_da = np.abs(np.mean(np.exp(1j * dp['da_peak_theta_phases'])))
-                                metrics['da_peak_theta_phase_mvl'] = float(mvl_da)
-                                metrics['da_peak_theta_preferred_phase'] = float(np.angle(np.mean(np.exp(1j * dp['da_peak_theta_phases']))))
+                            theta_peak_phase = theta_phase_interp(da_peak_times)
+                            theta_peak_phase = theta_peak_phase[np.isfinite(theta_peak_phase)]
+                            dp['da_peak_theta_phases'] = np.angle(np.exp(1j * theta_peak_phase))
+
+                            if beta_phase_interp is not None:
+                                beta_peak_phase = beta_phase_interp(da_peak_times)
+                                beta_peak_phase = beta_peak_phase[np.isfinite(beta_peak_phase)]
+                                dp['da_peak_beta_phases'] = np.angle(np.exp(1j * beta_peak_phase))
+                            else:
+                                dp['da_peak_beta_phases'] = []
+                        else:
+                            # Final fallback: use sparse high-DA moments to avoid an empty panel.
+                            high_da_thr = np.nanpercentile(dff, 90)
+                            high_da_idx = np.where(dff >= high_da_thr)[0]
+                            if len(high_da_idx) > 0:
+                                keep = np.insert(np.diff(high_da_idx) >= min_peak_distance, 0, True)
+                                high_da_idx = high_da_idx[keep]
+                                high_da_times = ts[high_da_idx]
+                                theta_peak_phase = theta_phase_interp(high_da_times)
+                                theta_peak_phase = theta_peak_phase[np.isfinite(theta_peak_phase)]
+                                dp['da_peak_theta_phases'] = np.angle(np.exp(1j * theta_peak_phase))
+
+                                if beta_phase_interp is not None:
+                                    beta_peak_phase = beta_phase_interp(high_da_times)
+                                    beta_peak_phase = beta_peak_phase[np.isfinite(beta_peak_phase)]
+                                    dp['da_peak_beta_phases'] = np.angle(np.exp(1j * beta_peak_phase))
+                                else:
+                                    dp['da_peak_beta_phases'] = []
+                                dp['da_peak_phase_source'] = 'high_da_windows'
+                                metrics['n_da_detected_peaks'] = int(len(high_da_idx))
+
+                        # Mean vector length = phase concentration
+                        if 'da_peak_theta_phases' in dp and len(dp['da_peak_theta_phases']) > 3:
+                            mvl_da = np.abs(np.mean(np.exp(1j * dp['da_peak_theta_phases'])))
+                            metrics['da_peak_theta_phase_mvl'] = float(mvl_da)
+                            metrics['da_peak_theta_preferred_phase'] = float(np.angle(np.mean(np.exp(1j * dp['da_peak_theta_phases']))))
 
                         # 3D (extended). DA modulation of PAC strength
                         # Split recording into epochs with high vs low DA, compute PAC in each
@@ -2380,13 +2443,26 @@ def analyze_of_tier3_lfp(paths: DataPaths):
     ax3 = fig.add_subplot(gs[0, 2])
     if 'theta_env' in dp:
         snip = min(60000, len(dp['theta_env']))
-        x = np.linspace(0, snip/1250.0, snip) # Approx 1250 Hz original fs
-        ax3.plot(x, dp['theta_env'][:snip]/np.max(dp['theta_env'][:snip]), label='Theta Env', color='blue', alpha=0.7)
-        ax3.plot(x, dp['gamma_env'][:snip]/np.max(dp['gamma_env'][:snip]), label='Gamma Env', color='red', alpha=0.7)
+        fs_plot = dp.get('lfp_fs', 1250.0)
+        x = np.arange(snip) / fs_plot
+
+        theta_env = dp['theta_env'][:snip]
+        gamma_env = dp['gamma_env'][:snip]
+        theta_scale = np.nanmax(theta_env)
+        gamma_scale = np.nanmax(gamma_env)
+        theta_norm = theta_env / theta_scale if np.isfinite(theta_scale) and theta_scale > 0 else theta_env
+        gamma_norm = gamma_env / gamma_scale if np.isfinite(gamma_scale) and gamma_scale > 0 else gamma_env
+
+        ax3.plot(x, theta_norm, label='Theta Env', color='blue', alpha=0.7)
+        ax3.plot(x, gamma_norm, label='Gamma Env', color='red', alpha=0.7)
         ax3.set_xlabel("Time (s)")
-        ax3.set_ylabel("Normalized Norm")
+        ax3.set_ylabel("Normalized Power")
         ax3.set_title("Theta & Gamma Envelopes (1 min snippet)")
         ax3.legend()
+    else:
+        ax3.axis('off')
+        ax3.text(0.5, 0.5, "Envelope data\nnot available", ha='center', va='center', fontsize=10)
+        ax3.set_title("Theta & Gamma Envelopes")
         
     # 4. Comodulogram Move
     ax4 = fig.add_subplot(gs[1, 0])
@@ -2429,6 +2505,10 @@ def analyze_of_tier3_lfp(paths: DataPaths):
         ax7.set_xlabel("Lag (s) DA vs LFP Env")
         ax7.set_title("Dopamine - LFP Envelope Cross-Corr")
         ax7.legend()
+    else:
+        ax7.axis('off')
+        ax7.text(0.5, 0.5, "DA-LFP cross-correlation\nnot available", ha='center', va='center', fontsize=10)
+        ax7.set_title("Dopamine - LFP Envelope Cross-Corr")
         
     # 8. DA-PAC Modulation (High DA - Low DA comodulogram difference)
     ax8 = fig.add_subplot(gs[2, 1])
@@ -2456,11 +2536,15 @@ def analyze_of_tier3_lfp(paths: DataPaths):
             if key in dp:
                 rho = metrics.get(f'{band_name}_power_speed_rho', np.nan)
                 ax9.plot(bc, dp[key] / (np.nanmax(dp[key]) + 1e-10),
-                         color=col, lw=2, label=f'{band_name} (ρ={rho:.2f})')
+                         color=col, lw=2, label=f'{band_name} (rho={rho:.2f})')
         ax9.set_xlabel("Speed (cm/s)")
         ax9.set_ylabel("Norm. Band Power")
         ax9.set_title("Band Power vs Speed (3A)")
         ax9.legend(fontsize=8)
+    else:
+        ax9.axis('off')
+        ax9.text(0.5, 0.5, "Band-speed data\nnot available", ha='center', va='center', fontsize=10)
+        ax9.set_title("Band Power vs Speed (3A)")
 
     # 10. Multi-band PPC (Pairwise Phase Consistency)
     ax10 = fig.add_subplot(gs[3, 1])
@@ -2488,10 +2572,16 @@ def analyze_of_tier3_lfp(paths: DataPaths):
         pref = metrics.get('da_peak_theta_preferred_phase', np.nan)
         if not np.isnan(pref):
             ax11.axvline(pref, color='red', lw=2, label=f'Pref={pref:.2f}rad')
-        ax11.set_title(f"Theta Phase at DA Peaks\n(MVL={metrics.get('da_peak_theta_phase_mvl', 0):.3f})", pad=10)
+        src = dp.get('da_peak_phase_source', 'detected_peaks')
+        n_da = len(phases_rose)
+        ax11.set_title(
+            f"Theta Phase at DA Peaks\n(n={n_da}, MVL={metrics.get('da_peak_theta_phase_mvl', 0):.3f}, src={src})",
+            pad=10
+        )
     else:
         ax11.axis('off')
-        ax11.text(0.5, 0.5, "DA data\nnot available", ha='center', va='center',
+        n_da = metrics.get('n_da_detected_peaks', 0)
+        ax11.text(0.5, 0.5, f"Insufficient DA peaks\n(n={n_da})", ha='center', va='center',
                   transform=ax11.transAxes, fontsize=10)
         ax11.set_title("Theta Phase at DA Peaks")
 
@@ -2508,12 +2598,13 @@ def analyze_of_tier3_lfp(paths: DataPaths):
         f"Gamma MVL/PPC: {metrics.get('mean_gamma_mvl_move', 0):.3f} / {metrics.get('mean_gamma_ppc_move', 0):.3f}\n"
         f"\n--- DA-LFP Coupling ---\n"
         f"DA-Theta XCorr: {metrics.get('da_theta_max_xcorr', 0):.3f}\n"
+        f"DA peak count: {metrics.get('n_da_detected_peaks', 0)}\n"
         f"DA Peak Phase MVL: {metrics.get('da_peak_theta_phase_mvl', 0):.3f}\n"
         f"DA mod Theta-Gamma PAC: {metrics.get('da_modulation_theta_gamma_pac', 0):.4f}\n"
         f"\n--- Band Power vs Speed ---\n"
-        f"Theta ρ: {metrics.get('theta_power_speed_rho', 0):.3f}  "
-        f"Beta ρ: {metrics.get('beta_power_speed_rho', 0):.3f}  "
-        f"Gamma ρ: {metrics.get('gamma_power_speed_rho', 0):.3f}\n"
+        f"Theta rho: {metrics.get('theta_power_speed_rho', 0):.3f}  "
+        f"Beta rho: {metrics.get('beta_power_speed_rho', 0):.3f}  "
+        f"Gamma rho: {metrics.get('gamma_power_speed_rho', 0):.3f}\n"
     )
     ax12.text(0.05, 0.95, col1, fontsize=9, va='top', ha='left', family='monospace',
               transform=ax12.transAxes)
@@ -2531,6 +2622,215 @@ def analyze_of_tier3_lfp(paths: DataPaths):
     df.to_csv(csv_file, mode=mode, header=header, index=False)
     logger.info(f"Tier 3 completed. Saved to {csv_file}")
 
+
+def _blocked_time_folds(n_samples, n_splits=5, gap_frames=0, min_test_size=20):
+    """Create leakage-aware blocked CV folds for time-series data."""
+    if n_samples < max(min_test_size * 2, n_splits):
+        return []
+
+    all_idx = np.arange(n_samples)
+    blocks = np.array_split(all_idx, n_splits)
+    folds = []
+
+    for block in blocks:
+        if len(block) < min_test_size:
+            continue
+
+        test_start, test_end = int(block[0]), int(block[-1])
+        train_mask = np.ones(n_samples, dtype=bool)
+        left = max(0, test_start - gap_frames)
+        right = min(n_samples, test_end + gap_frames + 1)
+        train_mask[left:right] = False
+
+        train_idx = all_idx[train_mask]
+        test_idx = block
+        if len(train_idx) < min_test_size:
+            continue
+        folds.append((train_idx, test_idx))
+
+    return folds
+
+
+def _summarize_scores(scores):
+    """Return mean/std/95% CI for an array-like score vector."""
+    s = np.asarray(scores, dtype=float)
+    s = s[np.isfinite(s)]
+    if len(s) == 0:
+        return np.nan, np.nan, np.nan, np.nan
+    mean_s = float(np.mean(s))
+    std_s = float(np.std(s))
+    ci = 1.96 * std_s / np.sqrt(max(1, len(s)))
+    return mean_s, std_s, float(mean_s - ci), float(mean_s + ci)
+
+
+def _circular_shift(y, shift):
+    if len(y) == 0:
+        return y
+    shift = int(shift) % len(y)
+    if shift == 0:
+        shift = 1
+    return np.roll(y, shift)
+
+
+def _decode_regression_blocked(X, y, n_splits=5, gap_frames=0):
+    """Blocked-CV regression decode with Ridge and OOF predictions."""
+    from sklearn.linear_model import Ridge
+    from sklearn.metrics import r2_score
+
+    y = np.asarray(y).flatten()
+    valid = np.isfinite(y)
+    Xv = np.asarray(X)[valid]
+    yv = y[valid]
+    folds = _blocked_time_folds(len(yv), n_splits=n_splits, gap_frames=gap_frames)
+    if not folds:
+        return {
+            'scores': np.array([]),
+            'mean': np.nan,
+            'std': np.nan,
+            'ci_low': np.nan,
+            'ci_high': np.nan,
+            'oof_true': np.array([]),
+            'oof_pred': np.array([]),
+        }
+
+    scores = []
+    oof_pred = np.full(len(yv), np.nan, dtype=float)
+    oof_true = yv.copy()
+
+    for tr_idx, te_idx in folds:
+        model = Ridge(alpha=1.0)
+        model.fit(Xv[tr_idx], yv[tr_idx])
+        pred = model.predict(Xv[te_idx])
+        oof_pred[te_idx] = pred
+        if len(te_idx) > 1:
+            scores.append(r2_score(yv[te_idx], pred))
+
+    mean_s, std_s, ci_l, ci_h = _summarize_scores(scores)
+    return {
+        'scores': np.asarray(scores, dtype=float),
+        'mean': mean_s,
+        'std': std_s,
+        'ci_low': ci_l,
+        'ci_high': ci_h,
+        'oof_true': oof_true[np.isfinite(oof_pred)],
+        'oof_pred': oof_pred[np.isfinite(oof_pred)],
+    }
+
+
+def _decode_regression_null(X, y, n_splits=5, gap_frames=0, n_shuffles=200, rng=None):
+    """Circular-shift null model for blocked-CV regression decoding."""
+    if rng is None:
+        rng = np.random.default_rng(42)
+    y = np.asarray(y).flatten()
+    n = len(y)
+    if n < 20:
+        return np.array([])
+
+    null_scores = []
+    for _ in range(n_shuffles):
+        shift = rng.integers(1, max(2, n - 1))
+        y_sh = _circular_shift(y, shift)
+        res = _decode_regression_blocked(X, y_sh, n_splits=n_splits, gap_frames=gap_frames)
+        null_scores.append(res['mean'])
+    return np.asarray(null_scores, dtype=float)
+
+
+def _decode_classification_blocked(X, y, n_splits=5, gap_frames=0):
+    """Blocked-CV classification decode with balanced accuracy/macro-F1 and OOF preds."""
+    from sklearn.metrics import balanced_accuracy_score, f1_score
+    from sklearn.svm import LinearSVC
+
+    y = np.asarray(y).flatten()
+    valid = ~pd.isnull(y)
+    Xv = np.asarray(X)[valid]
+    yv = y[valid]
+    if len(np.unique(yv)) < 2:
+        return {
+            'bal_scores': np.array([]),
+            'f1_scores': np.array([]),
+            'bal_mean': np.nan,
+            'bal_std': np.nan,
+            'bal_ci_low': np.nan,
+            'bal_ci_high': np.nan,
+            'f1_mean': np.nan,
+            'f1_std': np.nan,
+            'f1_ci_low': np.nan,
+            'f1_ci_high': np.nan,
+            'oof_true': np.array([]),
+            'oof_pred': np.array([]),
+        }
+
+    folds = _blocked_time_folds(len(yv), n_splits=n_splits, gap_frames=gap_frames)
+    if not folds:
+        return {
+            'bal_scores': np.array([]),
+            'f1_scores': np.array([]),
+            'bal_mean': np.nan,
+            'bal_std': np.nan,
+            'bal_ci_low': np.nan,
+            'bal_ci_high': np.nan,
+            'f1_mean': np.nan,
+            'f1_std': np.nan,
+            'f1_ci_low': np.nan,
+            'f1_ci_high': np.nan,
+            'oof_true': np.array([]),
+            'oof_pred': np.array([]),
+        }
+
+    bal_scores = []
+    f1_scores = []
+    oof_pred = np.full(len(yv), np.nan, dtype=float)
+    y_as_float = yv.astype(float)
+
+    for tr_idx, te_idx in folds:
+        y_tr = yv[tr_idx]
+        y_te = yv[te_idx]
+        if len(np.unique(y_tr)) < 2 or len(np.unique(y_te)) < 2:
+            continue
+        clf = LinearSVC(class_weight='balanced', max_iter=5000)
+        clf.fit(Xv[tr_idx], y_tr)
+        pred = clf.predict(Xv[te_idx])
+        oof_pred[te_idx] = pred.astype(float)
+        bal_scores.append(balanced_accuracy_score(y_te, pred))
+        f1_scores.append(f1_score(y_te, pred, average='macro'))
+
+    bal_mean, bal_std, bal_ci_l, bal_ci_h = _summarize_scores(bal_scores)
+    f1_mean, f1_std, f1_ci_l, f1_ci_h = _summarize_scores(f1_scores)
+
+    valid_oof = np.isfinite(oof_pred)
+    return {
+        'bal_scores': np.asarray(bal_scores, dtype=float),
+        'f1_scores': np.asarray(f1_scores, dtype=float),
+        'bal_mean': bal_mean,
+        'bal_std': bal_std,
+        'bal_ci_low': bal_ci_l,
+        'bal_ci_high': bal_ci_h,
+        'f1_mean': f1_mean,
+        'f1_std': f1_std,
+        'f1_ci_low': f1_ci_l,
+        'f1_ci_high': f1_ci_h,
+        'oof_true': y_as_float[valid_oof],
+        'oof_pred': oof_pred[valid_oof],
+    }
+
+
+def _decode_classification_null(X, y, n_splits=5, gap_frames=0, n_shuffles=200, rng=None):
+    """Circular-shift null model for blocked-CV classification decoding."""
+    if rng is None:
+        rng = np.random.default_rng(42)
+    y = np.asarray(y).flatten()
+    n = len(y)
+    if n < 20:
+        return np.array([])
+
+    null_bal = []
+    for _ in range(n_shuffles):
+        shift = rng.integers(1, max(2, n - 1))
+        y_sh = _circular_shift(y, shift)
+        res = _decode_classification_blocked(X, y_sh, n_splits=n_splits, gap_frames=gap_frames)
+        null_bal.append(res['bal_mean'])
+    return np.asarray(null_bal, dtype=float)
+
 def analyze_of_tier4_population(paths: DataPaths):
     from logging import getLogger
     logger = getLogger(__name__)
@@ -2542,15 +2842,29 @@ def analyze_of_tier4_population(paths: DataPaths):
     from scipy.ndimage import gaussian_filter1d
     from sklearn.decomposition import PCA, NMF
     from sklearn.svm import SVC
-    from sklearn.linear_model import RidgeCV
-    from sklearn.model_selection import cross_val_score, train_test_split
-    from sklearn.metrics import r2_score, accuracy_score, confusion_matrix
+    from sklearn.metrics import confusion_matrix
     import seaborn as sns
     from data_loader import SpikeDataLoader, DLCDataLoader
     
     logger.info("Running Tier 4: Comprehensive Population-Level Analysis...")
     metrics = {'mouse': paths.mouse_id, 'date': paths.date_str, 'genotype': paths.genotype}
     dp = {}
+
+    import os
+    fast_mode = os.environ.get('TIER4_FAST_MODE', '1') != '0'
+
+    cv_folds = 3 if fast_mode else 5
+    null_cv_folds = 2 if fast_mode else 3
+    cv_gap_frames = 30
+    n_null_shuffles_main = 30 if fast_mode else 200
+    n_null_shuffles_lag = 8 if fast_mode else 80
+    rng = np.random.default_rng(42)
+    metrics['decoding_fast_mode'] = int(fast_mode)
+    metrics['decoding_cv_folds'] = cv_folds
+    metrics['decoding_null_cv_folds'] = null_cv_folds
+    metrics['decoding_cv_gap_frames'] = cv_gap_frames
+    metrics['decoding_null_shuffles_main'] = n_null_shuffles_main
+    metrics['decoding_null_shuffles_lag'] = n_null_shuffles_lag
     
     try:
         spike_loader = SpikeDataLoader(paths.base_path)
@@ -2619,6 +2933,11 @@ def analyze_of_tier4_population(paths: DataPaths):
                 dp['pca_proj'] = pca_proj
                 dp['velocity'] = velocity
                 dp['labels'] = labels
+
+                # Use low-dimensional features for decoding to reduce runtime.
+                n_decode_dims = min(8, pca_proj.shape[1])
+                decode_mat = pca_proj[:, :n_decode_dims]
+                metrics['decoding_feature_dims'] = int(n_decode_dims)
                 
                 try:
                     from sklearn.manifold import TSNE
@@ -2668,37 +2987,80 @@ def analyze_of_tier4_population(paths: DataPaths):
                 
                 # 4C. Decoding Speed (Continuous)
                 sub_idx = np.arange(0, len(pop_mat_z), 5)
-                X = pop_mat_z[sub_idx]
+                X = decode_mat[sub_idx]
                 y_spd = velocity[sub_idx]
-                X_tr, X_te, y_tr, y_te = train_test_split(X, y_spd, test_size=0.3, random_state=42)
-                ridge = RidgeCV()
-                ridge.fit(X_tr, y_tr)
-                metrics['decoding_speed_r2'] = r2_score(y_te, ridge.predict(X_te))
+                speed_res = _decode_regression_blocked(
+                    X, y_spd, n_splits=cv_folds, gap_frames=cv_gap_frames
+                )
+                speed_null = _decode_regression_null(
+                    X, y_spd, n_splits=null_cv_folds, gap_frames=cv_gap_frames,
+                    n_shuffles=n_null_shuffles_main, rng=rng
+                )
+                metrics['decoding_speed_r2'] = speed_res['mean']
+                metrics['decoding_speed_r2_std'] = speed_res['std']
+                metrics['decoding_speed_r2_ci_low'] = speed_res['ci_low']
+                metrics['decoding_speed_r2_ci_high'] = speed_res['ci_high']
+                metrics['decoding_speed_r2_null_mean'] = float(np.nanmean(speed_null)) if len(speed_null) > 0 else np.nan
+                metrics['decoding_speed_r2_null_std'] = float(np.nanstd(speed_null)) if len(speed_null) > 0 else np.nan
+                metrics['decoding_speed_r2_delta_vs_null'] = (
+                    float(speed_res['mean'] - np.nanmean(speed_null)) if len(speed_null) > 0 and np.isfinite(speed_res['mean']) else np.nan
+                )
+                metrics['decoding_speed_r2_p'] = (
+                    float((1 + np.sum(speed_null >= speed_res['mean'])) / (1 + len(speed_null)))
+                    if len(speed_null) > 0 and np.isfinite(speed_res['mean']) else np.nan
+                )
+                dp['speed_decode_true'] = speed_res['oof_true']
+                dp['speed_decode_pred'] = speed_res['oof_pred']
                 
                 # Temporal Decoding Speed
                 lags = [-15, -10, -5, 0, 5, 10, 15] # frames
                 r2_lags = []
+                r2_lags_null = []
+                r2_lags_p = []
                 for lag in lags:
                     if lag < 0:
                         y_sh = velocity[-lag:]
-                        X_sh = pop_mat_z[:lag]
+                        X_sh = decode_mat[:lag]
                     elif lag > 0:
                         y_sh = velocity[:-lag]
-                        X_sh = pop_mat_z[lag:]
+                        X_sh = decode_mat[lag:]
                     else:
                         y_sh = velocity
-                        X_sh = pop_mat_z
+                        X_sh = decode_mat
                     X_sh_sub = X_sh[::5]
                     y_sh_sub = y_sh[::5]
                     if len(X_sh_sub) > 50:
-                        X_tr, X_te, y_tr, y_te = train_test_split(X_sh_sub, y_sh_sub, test_size=0.3, random_state=42)
-                        rg = RidgeCV()
-                        rg.fit(X_tr, y_tr)
-                        r2_lags.append(r2_score(y_te, rg.predict(X_te)))
+                        lag_res = _decode_regression_blocked(
+                            X_sh_sub, y_sh_sub, n_splits=cv_folds, gap_frames=cv_gap_frames
+                        )
+                        if fast_mode:
+                            lag_null = np.array([])
+                        else:
+                            lag_null = _decode_regression_null(
+                                X_sh_sub, y_sh_sub, n_splits=null_cv_folds, gap_frames=cv_gap_frames,
+                                n_shuffles=n_null_shuffles_lag, rng=rng
+                            )
+                        r2_lags.append(lag_res['mean'])
+                        r2_lags_null.append(float(np.nanmean(lag_null)) if len(lag_null) > 0 else np.nan)
+                        if len(lag_null) > 0 and np.isfinite(lag_res['mean']):
+                            r2_lags_p.append(float((1 + np.sum(lag_null >= lag_res['mean'])) / (1 + len(lag_null))))
+                        else:
+                            r2_lags_p.append(np.nan)
                     else:
                         r2_lags.append(np.nan)
+                        r2_lags_null.append(np.nan)
+                        r2_lags_p.append(np.nan)
                 dp['lags'] = np.array(lags) * dt # in seconds
                 dp['r2_lags'] = r2_lags
+                dp['r2_lags_null'] = r2_lags_null
+                dp['r2_lags_p'] = r2_lags_p
+
+                if np.any(np.isfinite(r2_lags)):
+                    best_idx_lag = int(np.nanargmax(r2_lags))
+                    metrics['decoding_speed_best_lag_sec'] = float(dp['lags'][best_idx_lag])
+                    metrics['decoding_speed_best_lag_r2'] = float(r2_lags[best_idx_lag])
+                    metrics['decoding_speed_best_lag_null_mean'] = float(r2_lags_null[best_idx_lag]) if np.isfinite(r2_lags_null[best_idx_lag]) else np.nan
+                    metrics['decoding_speed_best_lag_p'] = float(r2_lags_p[best_idx_lag]) if np.isfinite(r2_lags_p[best_idx_lag]) else np.nan
                 
                 # Motif Decoding (SVM)
                 y_lbl = labels[sub_idx]
@@ -2708,12 +3070,33 @@ def analyze_of_tier4_population(paths: DataPaths):
                 if sum(mask) > 20 and len(valid_states) > 1:
                     X_m = X[mask]
                     y_m = y_lbl[mask]
-                    X_tr, X_te, y_tr, y_te = train_test_split(X_m, y_m, test_size=0.3, random_state=42)
-                    clf = SVC(kernel='linear', class_weight='balanced')
-                    clf.fit(X_tr, y_tr)
-                    y_pred = clf.predict(X_te)
-                    metrics['decoding_motif_acc'] = accuracy_score(y_te, y_pred)
-                    dp['cm'] = confusion_matrix(y_te, y_pred, normalize='true')
+                    motif_res = _decode_classification_blocked(
+                        X_m, y_m, n_splits=cv_folds, gap_frames=cv_gap_frames
+                    )
+                    motif_null = _decode_classification_null(
+                        X_m, y_m, n_splits=null_cv_folds, gap_frames=cv_gap_frames,
+                        n_shuffles=n_null_shuffles_main, rng=rng
+                    )
+
+                    metrics['decoding_motif_acc'] = motif_res['bal_mean']
+                    metrics['decoding_motif_bal_acc'] = motif_res['bal_mean']
+                    metrics['decoding_motif_bal_acc_std'] = motif_res['bal_std']
+                    metrics['decoding_motif_bal_acc_ci_low'] = motif_res['bal_ci_low']
+                    metrics['decoding_motif_bal_acc_ci_high'] = motif_res['bal_ci_high']
+                    metrics['decoding_motif_macro_f1'] = motif_res['f1_mean']
+                    metrics['decoding_motif_macro_f1_std'] = motif_res['f1_std']
+                    metrics['decoding_motif_null_bal_acc_mean'] = float(np.nanmean(motif_null)) if len(motif_null) > 0 else np.nan
+                    metrics['decoding_motif_null_bal_acc_std'] = float(np.nanstd(motif_null)) if len(motif_null) > 0 else np.nan
+                    metrics['decoding_motif_delta_vs_null'] = (
+                        float(motif_res['bal_mean'] - np.nanmean(motif_null)) if len(motif_null) > 0 and np.isfinite(motif_res['bal_mean']) else np.nan
+                    )
+                    metrics['decoding_motif_p'] = (
+                        float((1 + np.sum(motif_null >= motif_res['bal_mean'])) / (1 + len(motif_null)))
+                        if len(motif_null) > 0 and np.isfinite(motif_res['bal_mean']) else np.nan
+                    )
+
+                    if len(motif_res['oof_true']) > 0:
+                        dp['cm'] = confusion_matrix(motif_res['oof_true'], motif_res['oof_pred'], normalize='true')
                     dp['cm_states'] = valid_states
 
                 # 4B (extended). Dimensionality during repetitive vs exploratory behavior
@@ -2743,22 +3126,43 @@ def analyze_of_tier4_population(paths: DataPaths):
                     valid = ~np.isnan(y_target)
                     if valid.sum() < 50:
                         metrics[f'decoding_{target_name}_r2'] = np.nan
+                        metrics[f'decoding_{target_name}_r2_std'] = np.nan
+                        metrics[f'decoding_{target_name}_r2_ci_low'] = np.nan
+                        metrics[f'decoding_{target_name}_r2_ci_high'] = np.nan
+                        metrics[f'decoding_{target_name}_r2_null_mean'] = np.nan
+                        metrics[f'decoding_{target_name}_r2_p'] = np.nan
                         continue
                     X_v = X[valid]
                     y_v = y_target[valid]
-                    X_tr, X_te, y_tr, y_te = train_test_split(X_v, y_v, test_size=0.3, random_state=42)
-                    reg = RidgeCV()
-                    reg.fit(X_tr, y_tr)
-                    metrics[f'decoding_{target_name}_r2'] = float(r2_score(y_te, reg.predict(X_te)))
+                    reg_res = _decode_regression_blocked(
+                        X_v, y_v, n_splits=cv_folds, gap_frames=cv_gap_frames
+                    )
+                    reg_null = _decode_regression_null(
+                        X_v, y_v, n_splits=null_cv_folds, gap_frames=cv_gap_frames,
+                        n_shuffles=n_null_shuffles_main, rng=rng
+                    )
+                    metrics[f'decoding_{target_name}_r2'] = reg_res['mean']
+                    metrics[f'decoding_{target_name}_r2_std'] = reg_res['std']
+                    metrics[f'decoding_{target_name}_r2_ci_low'] = reg_res['ci_low']
+                    metrics[f'decoding_{target_name}_r2_ci_high'] = reg_res['ci_high']
+                    metrics[f'decoding_{target_name}_r2_null_mean'] = float(np.nanmean(reg_null)) if len(reg_null) > 0 else np.nan
+                    metrics[f'decoding_{target_name}_r2_null_std'] = float(np.nanstd(reg_null)) if len(reg_null) > 0 else np.nan
+                    metrics[f'decoding_{target_name}_r2_delta_vs_null'] = (
+                        float(reg_res['mean'] - np.nanmean(reg_null)) if len(reg_null) > 0 and np.isfinite(reg_res['mean']) else np.nan
+                    )
+                    metrics[f'decoding_{target_name}_r2_p'] = (
+                        float((1 + np.sum(reg_null >= reg_res['mean'])) / (1 + len(reg_null)))
+                        if len(reg_null) > 0 and np.isfinite(reg_res['mean']) else np.nan
+                    )
                     if target_name == 'pos_x':
-                        dp['pos_decode_true_x'] = y_te
-                        dp['pos_decode_pred_x'] = reg.predict(X_te)
+                        dp['pos_decode_true_x'] = reg_res['oof_true']
+                        dp['pos_decode_pred_x'] = reg_res['oof_pred']
                     if target_name == 'pos_y':
-                        dp['pos_decode_true_y'] = y_te
-                        dp['pos_decode_pred_y'] = reg.predict(X_te)
+                        dp['pos_decode_true_y'] = reg_res['oof_true']
+                        dp['pos_decode_pred_y'] = reg_res['oof_pred']
                     if target_name == 'heading':
-                        dp['heading_decode_true'] = y_te
-                        dp['heading_decode_pred'] = reg.predict(X_te)
+                        dp['heading_decode_true'] = reg_res['oof_true']
+                        dp['heading_decode_pred'] = reg_res['oof_pred']
 
     except Exception as e:
         logger.error(f"Tier 4 failed: {e}", exc_info=True)
@@ -2829,19 +3233,29 @@ def analyze_of_tier4_population(paths: DataPaths):
     # 7. Speed Decoding R2
     ax7 = fig.add_subplot(gs[1, 2])
     if 'decoding_speed_r2' in metrics:
-        ax7.bar(['Speed'], [metrics['decoding_speed_r2']], color='teal', alpha=0.8)
-        ax7.set_ylim([0, max(0.5, metrics['decoding_speed_r2']*1.2)])
+        obs = metrics.get('decoding_speed_r2', np.nan)
+        null_m = metrics.get('decoding_speed_r2_null_mean', np.nan)
+        p_val = metrics.get('decoding_speed_r2_p', np.nan)
+        vals = [obs, null_m]
+        ax7.bar(['Observed', 'Null'], vals, color=['teal', 'gray'], alpha=0.8)
+        ylim_top = np.nanmax(np.array(vals, dtype=float))
+        ylim_top = 0.5 if not np.isfinite(ylim_top) else max(0.5, ylim_top * 1.25)
+        ax7.set_ylim([min(0.0, np.nanmin(np.array(vals, dtype=float)) - 0.05), ylim_top])
         ax7.set_ylabel("Test R2 Score")
-        ax7.set_title("Continuous Decoding Performance")
+        ax7.set_title(f"Continuous Decoding (Blocked CV)\np={p_val:.3g}" if np.isfinite(p_val) else "Continuous Decoding (Blocked CV)")
         
     # 8. Temporal Lag Speed Decoding
     ax8 = fig.add_subplot(gs[1, 3])
     if 'r2_lags' in dp:
         ax8.plot(dp['lags'], dp['r2_lags'], 'o-', color='crimson', lw=2)
+        if 'r2_lags_null' in dp:
+            ax8.plot(dp['lags'], dp['r2_lags_null'], 'o--', color='gray', lw=1.5, label='Null mean')
         ax8.axvline(0, color='k', linestyle='--')
         ax8.set_xlabel("Neural Lag vs Kinematics (s)")
         ax8.set_ylabel("Test R2")
         ax8.set_title("Temporal Predictive Decoding")
+        if 'r2_lags_null' in dp:
+            ax8.legend(fontsize=8)
         
     # 9. t-SNE Color Motif
     ax9 = fig.add_subplot(gs[2, 0])
@@ -2862,10 +3276,13 @@ def analyze_of_tier4_population(paths: DataPaths):
     # 11. Decoding Motif Acc
     ax11 = fig.add_subplot(gs[2, 2])
     if 'decoding_motif_acc' in metrics:
-        ax11.bar(['Motif Accuracy'], [metrics['decoding_motif_acc']], color='indigo', alpha=0.8)
+        obs = metrics.get('decoding_motif_acc', np.nan)
+        null_m = metrics.get('decoding_motif_null_bal_acc_mean', np.nan)
+        p_val = metrics.get('decoding_motif_p', np.nan)
+        ax11.bar(['Observed', 'Null'], [obs, null_m], color=['indigo', 'gray'], alpha=0.8)
         ax11.set_ylim([0, 1.0])
         ax11.set_ylabel("Balanced Accuracy")
-        ax11.set_title("Discrete Motif Decoding")
+        ax11.set_title(f"Discrete Motif Decoding\np={p_val:.3g}" if np.isfinite(p_val) else "Discrete Motif Decoding")
         
     # 12. Summary Text
     ax12 = fig.add_subplot(gs[2, 3])
@@ -2876,12 +3293,15 @@ def analyze_of_tier4_population(paths: DataPaths):
         f"{metrics.get('pr_overall', 0):.1f} / {metrics.get('pr_move', 0):.1f} / {metrics.get('pr_rest', 0):.1f}\n"
         f"PR (Repetitive / Exploratory): "
         f"{metrics.get('pr_repetitive', 0):.1f} / {metrics.get('pr_exploratory', 0):.1f}\n"
+        f"\n--- Decode Config ---\n"
+        f"Blocked CV folds/gap: {int(metrics.get('decoding_cv_folds', 0))}/{int(metrics.get('decoding_cv_gap_frames', 0))} frames\n"
+        f"Null shuffles: {int(metrics.get('decoding_null_shuffles', 0))}\n"
         f"\n--- Decoding R² ---\n"
-        f"Speed: {metrics.get('decoding_speed_r2', 0):.3f}\n"
-        f"Pos X:  {metrics.get('decoding_pos_x_r2', 0):.3f}\n"
-        f"Pos Y:  {metrics.get('decoding_pos_y_r2', 0):.3f}\n"
-        f"Heading:{metrics.get('decoding_heading_r2', 0):.3f}\n"
-        f"Motif Acc: {metrics.get('decoding_motif_acc', 0):.3f}\n"
+        f"Speed: {metrics.get('decoding_speed_r2', 0):.3f} (null {metrics.get('decoding_speed_r2_null_mean', 0):.3f}, p={metrics.get('decoding_speed_r2_p', np.nan):.3g})\n"
+        f"Pos X:  {metrics.get('decoding_pos_x_r2', 0):.3f} (p={metrics.get('decoding_pos_x_r2_p', np.nan):.3g})\n"
+        f"Pos Y:  {metrics.get('decoding_pos_y_r2', 0):.3f} (p={metrics.get('decoding_pos_y_r2_p', np.nan):.3g})\n"
+        f"Heading:{metrics.get('decoding_heading_r2', 0):.3f} (p={metrics.get('decoding_heading_r2_p', np.nan):.3g})\n"
+        f"Motif BA: {metrics.get('decoding_motif_bal_acc', 0):.3f} (null {metrics.get('decoding_motif_null_bal_acc_mean', 0):.3f}, p={metrics.get('decoding_motif_p', np.nan):.3g})\n"
     )
     ax12.text(0.05, 0.95, col1, fontsize=10, va='top', ha='left', family='monospace',
               transform=ax12.transAxes)
@@ -2913,7 +3333,9 @@ def analyze_of_tier4_population(paths: DataPaths):
         ax14.plot(lim, lim, 'k--', lw=1)
         ax14.set_xlabel("True X (px)")
         ax14.set_ylabel("Decoded X (px)")
-        ax14.set_title(f"Position Decoding X\nR²={metrics.get('decoding_pos_x_r2', 0):.3f}")
+        ax14.set_title(
+            f"Position Decoding X\nR²={metrics.get('decoding_pos_x_r2', 0):.3f}, p={metrics.get('decoding_pos_x_r2_p', np.nan):.3g}"
+        )
     else:
         ax14.axis('off')
         ax14.text(0.5, 0.5, "Position data\nnot available", ha='center', va='center',
@@ -2928,7 +3350,9 @@ def analyze_of_tier4_population(paths: DataPaths):
         ax15.plot([-np.pi, np.pi], [-np.pi, np.pi], 'k--', lw=1)
         ax15.set_xlabel("True Heading (rad)")
         ax15.set_ylabel("Decoded Heading (rad)")
-        ax15.set_title(f"Heading Decoding\nR²={metrics.get('decoding_heading_r2', 0):.3f}")
+        ax15.set_title(
+            f"Heading Decoding\nR²={metrics.get('decoding_heading_r2', 0):.3f}, p={metrics.get('decoding_heading_r2_p', np.nan):.3g}"
+        )
     else:
         ax15.axis('off')
         ax15.text(0.5, 0.5, "Heading data\nnot available", ha='center', va='center',

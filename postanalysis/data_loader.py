@@ -142,12 +142,28 @@ class SpikeDataLoader(DataStreamLoader):
         else:
             logger.warning("No unit labels available. Cannot filter by label 1 or 2. Using all units.")
 
+        # 5. Load waveform metrics from template_metrics.csv (peak_to_valley in seconds → ms)
+        waveform_metrics = {}
+        template_metrics_path = kilosort_dir / "template_metrics.csv"
+        if template_metrics_path.exists():
+            try:
+                df_tm = pd.read_csv(template_metrics_path)
+                if 'unit_id' in df_tm.columns and 'peak_to_valley' in df_tm.columns:
+                    for _, row in df_tm.iterrows():
+                        cid = int(row['unit_id'])
+                        waveform_metrics[cid] = {
+                            'trough_to_peak_ms': row['peak_to_valley'] * 1000.0  # s → ms
+                        }
+            except Exception as e:
+                logger.warning(f"Failed to load template_metrics.csv: {e}")
+
         return {
             'spike_times_sec': spike_times_sec,
             'spike_clusters': spike_clusters,
             'unique_clusters': unique_clusters,
             'unit_types': unit_types,
-            'unit_labels': unit_labels
+            'unit_labels': unit_labels,
+            'waveform_metrics': waveform_metrics
         }
 
 
@@ -660,94 +676,103 @@ class PhotometryDataLoader(DataStreamLoader):
     """Load photometry (TDT) data with proper absolute timestamp extraction."""
     
     def load(
-        self, 
+        self,
         dff_path: Path,
-        raw_path: Path
+        raw_path: Path = None
     ) -> Dict[str, np.ndarray]:
         """
-        Load photometry data (dFF values and absolute timestamps).
-        
-        CRITICAL: Do not use normalized timestamps from dFF struct.
-        Must extract absolute timestamps from raw H5 file.
-        
+        Load photometry dFF data from a MATLAB v7.3 (HDF5) .mat file.
+
+        The dFF .mat is saved by TDT_dFF_stage2.m with struct layout:
+            dFF.pair(n).data  – dFF signal array
+            dFF.pair(n).Fs    – sampling rate (Hz)
+            dFF.pair(n).Ts    – normalized [0,1] timestamps (NOT usable)
+
+        Timestamps are reconstructed as  t = arange(N) / Fs  (seconds from
+        session start), which aligns with spike_seconds_adj.npy (also t=0-based).
+
         Args:
             dff_path: Path to _dFF.mat file
-            raw_path: Path to _UnivRAW_offdemod.mat file
-        
+            raw_path: Unused (kept for call-site compatibility)
+
         Returns:
-            Dict with 'dff_values' and 'dff_timestamps' (absolute seconds)
+            Dict with 'dff_values' and 'dff_timestamps' (seconds from session start)
         """
         if not dff_path or not dff_path.exists():
             raise FileNotFoundError(f"dFF file not found: {dff_path}")
-        if not raw_path or not raw_path.exists():
-            raise FileNotFoundError(f"RAW file not found: {raw_path}")
-        dff_struct = sio.loadmat(dff_path)
-        dff_var_name = 'dFF'
-        if dff_var_name not in dff_struct:
-            possible = [k for k in dff_struct.keys() if 'dff' in k.lower()]
-            if possible:
-                dff_var_name = possible[0]
-            else:
-                 standard_keys = ['__header__', '__version__', '__globals__']
-                 keys = [k for k in dff_struct.keys() if k not in standard_keys]
-                 if keys:
-                     dff_var_name = keys[0]
-        
-        if dff_var_name not in dff_struct:
-             raise ValueError(f"Could not find dFF variable in {dff_path}")
 
-        dff_obj = dff_struct[dff_var_name]
+        dff_vals = None
+        fs = None
+
+        # Primary: h5py (v7.3 HDF5 .mat)
         try:
-            if dff_obj.shape == (1, 1):
-                val = dff_obj[0, 0]
-                if hasattr(val, 'dtype') and val.dtype.names and 'pair' in val.dtype.names:
-                    pair_struct = val['pair']
-                    if pair_struct.size > 0:
-                        dff_obj = pair_struct[0, 0]['data']
-                        logger.info("  Extracted dFF data from nested 'pair' struct.")
+            with h5py.File(dff_path, 'r') as f:
+                pair_ds = f['dFF']['pair']          # object-reference array (1, n_pairs)
+                pair_refs = np.ravel(pair_ds)
+                # pair index 0 = 465 sensor / 405 control (first meaningful dFF)
+                pair_grp = f[pair_refs[0]]
+                dff_vals = np.array(pair_grp['data']).squeeze().astype(np.float64)
+                fs = float(np.array(pair_grp['Fs']).squeeze())
+                logger.info(f"Loaded dFF via h5py: {len(dff_vals)} samples @ {fs:.1f} Hz")
         except Exception as e:
-            logger.warning(f"  Failed to traverse struct hierarchy: {e}. Using raw object.")
+            logger.info(f"h5py dFF load unavailable ({e}); using scipy.io fallback")
 
-        dff_vals = dff_obj.squeeze()
-        
-        with h5py.File(raw_path, 'r') as f_raw:
-            ts_refs = f_raw['/handles/Ts']
-            box_index = 0
-            ts_abs = np.array(f_raw[np.ravel(ts_refs)[box_index]]).squeeze()
-            
-        dff_vals = np.atleast_1d(dff_vals)
-        ts_abs = np.atleast_1d(ts_abs)
-        
-        if dff_vals.ndim == 0:
-             dff_vals = dff_vals.reshape(1)
-        if ts_abs.ndim == 0:
-             ts_abs = ts_abs.reshape(1)
-             
-        logger.info(f"Debug: dff_vals shape={dff_vals.shape}, ts_abs shape={ts_abs.shape}")
-        
-        # Validate lengths match
-        if len(dff_vals) != len(ts_abs):
-            logger.warning(
-                f"dFF values ({len(dff_vals)}) and timestamps ({len(ts_abs)}) have different lengths. "
-                f"Truncating to shorter length."
-            )
-            min_len = min(len(dff_vals), len(ts_abs))
-            dff_vals = dff_vals[:min_len]
-            ts_abs = ts_abs[:min_len]
-        
-        # Validate that timestamps are absolute (not normalized 0-1)
-        if ts_abs.max() <= 1.0:
-            logger.error(
-                "TDT time vector appears to be normalized (max <= 1.0). "
-                "This suggests incorrect timestamp extraction. Check raw H5 file."
-            )
-            raise ValueError("TDT timestamps appear normalized - check extraction logic")
-        
+        # Fallback: scipy.io (older v5 .mat)
+        if dff_vals is None:
+            try:
+                dff_struct = sio.loadmat(dff_path)
+
+                # Common formats:
+                # 1) dFF(1).pair(1).data/Fs/Ts
+                # 2) dFFOut(1).box(1).pair(1).data/Fs/Ts
+                obj = dff_struct.get('dFF', None)
+                if obj is None:
+                    obj = dff_struct.get('dFFOut', None)
+
+                if obj is None:
+                    standard_keys = {'__header__', '__version__', '__globals__'}
+                    var_name = next((k for k in dff_struct if k not in standard_keys), None)
+                    obj = dff_struct[var_name] if var_name else None
+
+                if obj is not None and hasattr(obj, 'shape') and obj.shape[0] > 0 and obj.shape[1] > 0:
+                    val = obj[0, 0]
+
+                    if hasattr(val, 'dtype') and val.dtype.names:
+                        field_names = set(val.dtype.names)
+
+                        # Format 1: dFF -> pair
+                        if 'pair' in field_names:
+                            pair_arr = val['pair']
+                            pair0 = pair_arr[0, 0]
+                            dff_vals = np.array(pair0['data']).squeeze().astype(np.float64)
+                            fs = float(np.array(pair0['Fs']).squeeze())
+
+                        # Format 2: dFFOut -> box -> pair
+                        elif 'box' in field_names:
+                            box_arr = val['box']
+                            # Use the first box by default; downstream analysis only
+                            # requires one DA trace and this mirrors prior behavior.
+                            box0 = box_arr[0, 0]
+                            pair_arr = box0['pair']
+                            pair0 = pair_arr[0, 0]
+                            dff_vals = np.array(pair0['data']).squeeze().astype(np.float64)
+                            fs = float(np.array(pair0['Fs']).squeeze())
+            except Exception as e2:
+                raise ValueError(f"Could not load dFF from {dff_path}: {e2}")
+
+        if dff_vals is None or fs is None:
+            raise ValueError(f"Failed to extract dFF data or Fs from {dff_path}")
+
+        dff_vals = np.atleast_1d(dff_vals).flatten()
+
+        # dFF.pair.Ts is normalized to [0,1] by MATLAB — reconstruct from Fs instead
+        ts_abs = np.arange(len(dff_vals)) / fs
+
         logger.info(
             f"Loaded photometry data: {len(dff_vals)} samples, "
-            f"time range: {ts_abs.min():.2f} - {ts_abs.max():.2f} seconds"
+            f"time range: {ts_abs[0]:.2f} - {ts_abs[-1]:.2f} s @ {fs:.1f} Hz"
         )
-        
+
         return {
             'dff_values': dff_vals,
             'dff_timestamps': ts_abs
@@ -1384,7 +1409,8 @@ def load_session_data(
                  session_tdt_dir = found[0]
         
         if session_tdt_dir.exists():
-             paths.tdt_dff = next(session_tdt_dir.glob(f"*{mouse_id}*dFF*.mat"), None)
+             paths.tdt_dff = (next(session_tdt_dir.glob(f"*{mouse_id}*dFF*.mat"), None)
+                              or next(session_tdt_dir.glob("*dFF*.mat"), None))
              paths.tdt_raw = next(session_tdt_dir.glob(f"*UnivRAW_offdemod.mat"), None)
     except: pass
     
